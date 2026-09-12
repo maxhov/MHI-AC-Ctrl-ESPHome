@@ -143,6 +143,12 @@ static MisoFrame run_frame_raw(MosiFrame mosi, bool seal) {
 
 static MisoFrame run_frame(MosiFrame mosi) { return run_frame_raw(mosi, true); }
 
+// The mailbox is addressed by the (DB6, DB9) pair, not DB9 alone -- C0/21 is a different
+// transaction that happens to share the selector. Identify the Silent write by both.
+static bool is_silent_write(const MisoFrame &m) {
+  return m.bytes[DB6] == 0x80 && m.bytes[DB9] == 0x21;
+}
+
 // Frames are only parsed when something changed, so nudge a byte the core does
 // not interpret when a test needs two look-alike frames back to back.
 static MosiFrame idle_frame(uint8_t nonce) {
@@ -169,7 +175,7 @@ static void test_silent_on_writes_the_service_command() {
   int first_seen = -1;
   for (int i = 0; i < 6; i++) {
     MisoFrame miso = run_frame(idle_frame(0x20 + i));
-    if (miso.bytes[DB9] == 0x21) {
+    if (is_silent_write(miso)) {
       if (first_seen < 0)
         first_seen = i;
       frames_with_command++;
@@ -187,11 +193,11 @@ static void test_mailbox_is_released_after_the_command() {
   bool saw_opdata_request = false;
   for (int i = 0; i < 60; i++) {
     MisoFrame miso = run_frame(idle_frame(0x40 + (uint8_t)i));
-    if (miso.bytes[DB9] == 0x21)
+    if (is_silent_write(miso))
       saw_stuck_command = true;
-    if (miso.bytes[DB9] != 0x21 && miso.bytes[DB9] != 0xff)
+    if (!is_silent_write(miso) && miso.bytes[DB9] != 0xff)
       saw_opdata_request = true;
-    if (miso.bytes[DB9] != 0x21)
+    if (!is_silent_write(miso))
       check_eq(miso.bytes[DB10], 0xff, "DB10 is released back to 0xff");
   }
   check(!saw_stuck_command, "Silent command is not repeated forever");
@@ -204,7 +210,7 @@ static void test_silent_off_writes_zero() {
   bool seen = false;
   for (int i = 0; i < 6; i++) {
     MisoFrame miso = run_frame(idle_frame(0x60 + (uint8_t)i));
-    if (miso.bytes[DB9] == 0x21) {
+    if (is_silent_write(miso)) {
       seen = true;
       check(miso.driven[DB10] != 0, "DB10 was actually clocked out");
       check_eq(miso.bytes[DB10], 0x00, "DB10 carries Silent OFF");
@@ -359,7 +365,7 @@ static void test_two_toggles_never_merge_on_the_wire() {
     if (i == 2)
       core.set_silent(false);      // second toggle while the first is still in flight
     MisoFrame m = quiet_frame();
-    if (m.bytes[DB9] == 0x21) {
+    if (is_silent_write(m)) {
       run_len++;
       if (run_len > longest) longest = run_len;
     } else {
@@ -383,7 +389,7 @@ static int request_window_width(int offset, int gap) {
   bool started = false;
   for (int i = 0; i < 80; i++) {
     MisoFrame m = quiet_frame();
-    bool request = (m.bytes[DB9] != 0xff && m.bytes[DB9] != 0x21);
+    bool request = (m.bytes[DB9] != 0xff && !is_silent_write(m));
     if (request) { started = true; width++; }
     else if (started) break;
   }
@@ -451,7 +457,7 @@ static void test_repeated_toggles_do_not_starve_the_poller() {
     if (i % 40 == 0)
       core.set_silent((i % 80) == 0);
     MisoFrame m = quiet_frame();
-    if (m.bytes[DB9] != 0xff && m.bytes[DB9] != 0x21)
+    if (m.bytes[DB9] != 0xff && !is_silent_write(m))
       selectors.insert((m.bytes[DB6] << 8) | m.bytes[DB9]);
   }
   check((int) selectors.size() >= 21, "every operating data selector is still requested");
@@ -560,6 +566,24 @@ static void test_db13_reports_what_the_unit_is_doing() {
   check_eq(capture.count(status_compressor), 0, "unknown DB13 bits are not treated as the compressor");
 }
 
+static void test_a_read_of_selector_21_is_not_a_silent_write() {
+  printf("a C0/21 read is not mistaken for the Silent Mode write\n");
+  // SPI_protocol.md is explicit that DB9 alone does not identify a transaction: C0/21 is an
+  // unrelated read request that shares the selector with the 80/21 Silent write. A frame is
+  // only the write if DB6 says so too.
+  MisoFrame read_request{};
+  read_request.bytes[DB6] = 0xc0;
+  read_request.bytes[DB9] = 0x21;
+  read_request.bytes[DB10] = 0xff;
+  check(!is_silent_write(read_request), "C0/21 is not the Silent write");
+
+  MisoFrame write{};
+  write.bytes[DB6] = 0x80;
+  write.bytes[DB9] = 0x21;
+  write.bytes[DB10] = 0x01;
+  check(is_silent_write(write), "80/21 is the Silent write");
+}
+
 static void test_silent_status_is_polled() {
   printf("Silent Mode state is polled in the operating data cycle\n");
   bool requested = false;
@@ -578,7 +602,7 @@ static void test_silent_write_still_works_with_polling_off() {
   int sent = 0;
   for (int i = 0; i < 6; i++) {
     MisoFrame miso = run_frame(idle_frame((uint8_t)(0x10 + (uint8_t)i)));
-    if (miso.bytes[DB9] == 0x21) {
+    if (is_silent_write(miso)) {
       sent++;
       check_eq(miso.bytes[DB10], 0x01, "Silent ON still carried");
     }
@@ -634,6 +658,7 @@ int main() {
   test_repeated_toggles_do_not_starve_the_poller();
   test_frame_filter();
   test_db13_reports_what_the_unit_is_doing();
+  test_a_read_of_selector_21_is_not_a_silent_write();
   test_silent_status_is_polled();
   test_silent_write_still_works_with_polling_off();
   test_frame_observer();
