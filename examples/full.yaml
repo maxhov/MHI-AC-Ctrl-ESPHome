@@ -84,6 +84,12 @@ binary_sensor:
       name: "Defrost"
     vanes_3d_auto_enabled:
       name: "3D Auto"
+    # From DB13, so these follow what the unit is actually doing rather than what it was
+    # last asked to do, and they update within a frame instead of on the 20s poll.
+    compressor:
+      name: "Compressor"
+    heating:
+      name: "Heating"
 
 sensor:
   - platform: uptime
@@ -128,6 +134,10 @@ sensor:
       name: "Compressor protection code"
     error_code:
       name: "Error code"
+    # Running total of frames the controller could not read. Flat is healthy; a rising rate
+    # means the SPI timing is marginal.
+    frame_errors:
+      name: "Frame errors"
     vanes_pos:
       name: "Vanes"
     vanesLR_pos:

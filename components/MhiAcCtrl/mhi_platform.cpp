@@ -64,7 +64,16 @@ void MhiPlatform::loop() {
 
     int ret = mhi_ac_ctrl_core_.loop(100);
     if (ret < 0) {
+        this->frame_errors_++;
         ESP_LOGE(TAG, "mhi_ac_ctrl_core,loop error: %i", ret);
+    }
+
+    // Publish the running error count rather than leaving it only in the log. A rate derived
+    // from this is the one number that says whether a change to the frame scheduling made
+    // the SPI timing worse, which is not something a log you have to eyeball can tell you.
+    if (millis() - this->last_error_report_ >= 10000) {
+        this->last_error_report_ = millis();
+        this->cbiStatusFunction(status_frame_errors, (int) this->frame_errors_);
     }
 }
 

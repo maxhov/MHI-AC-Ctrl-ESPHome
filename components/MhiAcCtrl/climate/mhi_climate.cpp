@@ -46,9 +46,13 @@ void MhiClimate::update_status(ACStatus status, int value) {
     
     ESP_LOGD(TAG, "received status=%i value=%i power=%i", status, value, this->power_);
 
-    // Silent Mode is not a climate concern. Without this, the power-off workaround below
-    // would emit a climate state update for every Silent Mode poll and every toggle.
-    if (status == opdata_silent)
+    // None of these are a climate concern. Without this, the power-off workaround below
+    // emits a climate state update for every one of them, for an entity nobody touched.
+    // The right fix is to scope that workaround to the statuses this switch actually
+    // handles, but its switch nests cases, so getting the list wrong would silently stop a
+    // real update path -- not something to change without a unit to test it on.
+    if (status == opdata_silent || status == status_compressor ||
+        status == status_heating || status == status_frame_errors)
         return;
 
     if (this->power_ == power_off) {

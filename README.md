@@ -137,6 +137,8 @@ This will allow for lower temperature heating or cooling.
 
 **Unreleased**
  - Silent Mode switch: read and control the outdoor unit quiet function https://github.com/ginkage/MHI-AC-Ctrl-ESPHome/issues/166
+ - `compressor` and `heating` binary sensors, decoded from DB13
+ - `frame_errors` sensor, a running total of unreadable frames
  - `spi_logging` and `operating_data_polling` switches for protocol analysis
  - Host-side tests for the SPI framing in `test/`
 
