@@ -83,15 +83,21 @@ turns the operating data requests off, which stops the service mailbox bytes chu
 
 **Only changed frames are logged.** Frames arrive about 20 times a second, and formatting and
 shipping every one of them costs more than the frame interval allows, which disturbs the very
-SPI timing you are trying to observe. The signature toggle, the frame-pair bit and the
-checksums are ignored when deciding whether a frame changed, since those move every frame by
-design. Rejected frames are always logged, whether they changed or not.
+SPI timing you are trying to observe. Ignored when deciding whether a frame changed: the
+signature toggle, the frame-pair bit, the checksums and the AC's own room temperature in
+`DB3`, all of which move every frame by design.
+
+Frames the controller rejected are logged too, but rate limited to about one line a second
+with a count of what was skipped, because a bad bus rejects every frame and an unthrottled
+log would make the timing worse. Frames lost to a stuck clock are not logged at all: they
+never complete a transfer, so nothing sees them.
 
 To hunt for an unknown field:
 
 1. Turn `operating_data_polling` **off**. A settled unit then goes almost silent, because the
    mailbox stops rotating through its selectors. Every operating data sensor stops updating
-   until you turn it back on.
+   until you turn it back on. Silent Mode still reads itself back, so that switch keeps
+   working, but that is one exchange per toggle rather than a continuous poll.
 2. Turn `spi_logging` **on**. The first frame is logged as a baseline.
 3. Capture to a file with `esphome logs your-device.yaml > capture.log 2>&1`.
 4. Press one button on the remote. Press one, not several.

@@ -1,4 +1,5 @@
 #include "mhi_platform.h"
+#include "mhi_frame_filter.h"
 
 #include <string.h>
 
@@ -204,36 +205,6 @@ void MhiPlatform::set_silent(bool value) {
     ESP_LOGD(TAG, "set silent mode: %i", value);
 }
 
-namespace {
-
-// Three fields change on every single frame by design: the MOSI signature toggle, the MISO
-// frame-pair bit and the checksums. Blanking them is what lets a genuine one-byte change
-// stand out instead of drowning in noise.
-void normalise_frame(const byte* source, byte* target, byte frame_size, bool is_mosi) {
-    memcpy(target, source, frame_size);
-    if (is_mosi)
-        target[SB0] &= 0xfe;
-    else
-        target[DB14] &= ~0x04;
-    target[CBH] = 0;
-    target[CBL] = 0;
-    if (frame_size == 33)
-        target[CBL2] = 0;
-}
-
-void format_hex(const byte* frame, byte frame_size, char* target) {
-    // Not named HEX: Arduino already defines that as the number base 16.
-    static const char hex_digits[] = "0123456789ABCDEF";
-    for (byte i = 0; i < frame_size; i++) {
-        if (i != 0)
-            *target++ = ' ';
-        *target++ = hex_digits[frame[i] >> 4];
-        *target++ = hex_digits[frame[i] & 0x0f];
-    }
-    *target = '\0';
-}
-
-}  // namespace
 
 void MhiPlatform::set_spi_logging(bool value) {
     this->spi_logging_ = value;
@@ -256,6 +227,25 @@ void MhiPlatform::cbiFrameFunction(const byte* mosi_frame, const byte* miso_fram
     // more than the frame interval allows and disturbs the very SPI timing being investigated,
     // so only frames that actually changed are logged. Switch the operating data polling off
     // as well and a settled unit goes quiet, which is what makes a remote keypress obvious.
+    if (status != err_msg_valid_frame) {
+        // A bad bus rejects a frame every ~50 ms, and formatting each one from inside the
+        // frame loop steals the time the next frame needs — the failure feeds itself. Report
+        // the first, then at most one line per second with a count of what was skipped. A
+        // corrupt frame must also never become the baseline the change filter compares
+        // against, so this returns without touching it.
+        this->rejected_since_log_++;
+        bool first = (this->last_reject_log_frame_ == 0);
+        if (!first && this->frame_sequence_ - this->last_reject_log_frame_ < 20)
+            return;
+        this->last_reject_log_frame_ = this->frame_sequence_;
+        char rejected_hex[33 * 3];
+        format_hex(mosi_frame, frame_size, rejected_hex);
+        ESP_LOGI(TAG, "#%u rejected status=%i (%u since the last of these) MOSI %s",
+                 this->frame_sequence_, status, this->rejected_since_log_, rejected_hex);
+        this->rejected_since_log_ = 0;
+        return;
+    }
+
     byte mosi_now[33];
     byte miso_now[33];
     normalise_frame(mosi_frame, mosi_now, frame_size, true);
@@ -265,7 +255,7 @@ void MhiPlatform::cbiFrameFunction(const byte* mosi_frame, const byte* miso_fram
         || memcmp(mosi_now, this->previous_mosi_, frame_size) != 0
         || memcmp(miso_now, this->previous_miso_, frame_size) != 0;
 
-    if (!changed && status == err_msg_valid_frame)
+    if (!changed)
         return;
 
     memcpy(this->previous_mosi_, mosi_now, frame_size);

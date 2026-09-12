@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../components/MhiAcCtrl/MHI-AC-Ctrl-core.h"
+#include "../components/MhiAcCtrl/mhi_frame_filter.h"
 
 int SCK_PIN = 14;
 int MOSI_PIN = 13;
@@ -18,6 +19,7 @@ MhiFakeBus mhi_bus;
 void mhi_bus_begin_frame(const uint8_t *mosi, uint8_t frame_size) {
   memcpy(mhi_bus.mosi, mosi, 33);
   memset(mhi_bus.miso, 0, sizeof(mhi_bus.miso));
+  memset(mhi_bus.miso_driven, 0, sizeof(mhi_bus.miso_driven));
   mhi_bus.frame_size = frame_size;
   mhi_bus.bit_pos = 0;
   mhi_bus.preamble_until = mhi_bus.millis + 5;
@@ -124,6 +126,7 @@ struct MosiFrame {
 // Clock one frame through the core and return what it put on MISO.
 struct MisoFrame {
   uint8_t bytes[33];
+  uint8_t driven[33];
   int result;
 };
 
@@ -134,6 +137,7 @@ static MisoFrame run_frame_raw(MosiFrame mosi, bool seal) {
   MisoFrame out;
   out.result = core.loop(100);
   memcpy(out.bytes, mhi_bus.miso, sizeof(out.bytes));
+  memcpy(out.driven, mhi_bus.miso_driven, sizeof(out.driven));
   return out;
 }
 
@@ -202,6 +206,7 @@ static void test_silent_off_writes_zero() {
     MisoFrame miso = run_frame(idle_frame(0x60 + (uint8_t)i));
     if (miso.bytes[DB9] == 0x21) {
       seen = true;
+      check(miso.driven[DB10] != 0, "DB10 was actually clocked out");
       check_eq(miso.bytes[DB10], 0x00, "DB10 carries Silent OFF");
     }
   }
@@ -232,15 +237,26 @@ static void test_status_record_is_not_confused_with_other_records() {
   printf("look-alike records are ignored\n");
   capture.clear();
 
-  // Same selector, but not the Silent status record shape.
-  MosiFrame other;
-  other.bytes[DB6] = 0xc0;
-  other.bytes[DB9] = 0xdd;
-  other.bytes[DB10] = 0x10;
-  other.bytes[DB11] = 0x20;
-  other.bytes[DB12] = 0x37;
-  run_frame(other);
-  check_eq(capture.count(opdata_silent), 0, "DB10/DB12 mismatch is not treated as Silent status");
+  // Each discriminator is checked on its own, so that deleting either half of the guard
+  // fails a test rather than being masked by the other half.
+  MosiFrame wrong_db10;
+  wrong_db10.bytes[DB6] = 0xc0;
+  wrong_db10.bytes[DB9] = 0xdd;
+  wrong_db10.bytes[DB10] = 0x10;   // only DB10 is off-shape
+  wrong_db10.bytes[DB11] = 0x20;
+  wrong_db10.bytes[DB12] = 0x00;
+  run_frame(wrong_db10);
+  check_eq(capture.count(opdata_silent), 0, "a wrong DB10 alone is not Silent status");
+
+  capture.clear();
+  MosiFrame wrong_db12;
+  wrong_db12.bytes[DB6] = 0xc0;
+  wrong_db12.bytes[DB9] = 0xdd;
+  wrong_db12.bytes[DB10] = 0x80;
+  wrong_db12.bytes[DB11] = 0x20;
+  wrong_db12.bytes[DB12] = 0x37;   // only DB12 is off-shape
+  run_frame(wrong_db12);
+  check_eq(capture.count(opdata_silent), 0, "a wrong DB12 alone is not Silent status");
 }
 
 static void test_unsolicited_status_record_is_decoded() {
@@ -265,100 +281,236 @@ static void test_unsolicited_status_record_is_decoded() {
   }
 }
 
-static void test_confirmation_waits_for_a_fresh_read() {
-  printf("a Silent write is confirmed by a fresh read, not by a reply already in flight\n");
+static uint8_t rig_nonce = 0x30;
+static MisoFrame quiet_frame() { return run_frame(idle_frame(rig_nonce += 37)); }
 
-  MosiFrame on;
-  on.bytes[DB9] = 0xdd;
-  on.bytes[DB10] = 0x80;
-  on.bytes[DB11] = 0x20;
-  on.bytes[DB12] = 0x00;
+// Run frames until the controller puts a Silent Mode read on the mailbox.
+static bool run_until_silent_read(int limit) {
+  for (int i = 0; i < limit; i++) {
+    MisoFrame m = quiet_frame();
+    if (m.bytes[DB6] == 0xc0 && m.bytes[DB9] == 0xdd)
+      return true;
+  }
+  return false;
+}
+
+static MosiFrame silent_record(uint8_t flags, uint8_t nonce) {
+  MosiFrame f;
+  f.bytes[DB9] = 0xdd;
+  f.bytes[DB10] = 0x80;
+  f.bytes[DB11] = flags;
+  f.bytes[DB12] = 0x00;
+  f.bytes[DB14] = nonce;
+  return f;
+}
+
+static void test_a_write_is_confirmed_by_its_own_read() {
+  printf("a Silent write is confirmed by a reply to a read issued after it\n");
 
   capture.clear();
-  run_frame(on);
+  run_frame(silent_record(0x20, 0x01));
   check(capture.has(opdata_silent, 1), "baseline: Silent Mode reads as on");
 
   core.set_silent(false);
 
-  // A reply that crossed with the command still describes the old state. Reporting it would
-  // flip the switch back under the user a moment after they moved it.
+  // A reply that crossed with the command still describes the old state. Reporting it
+  // would flip the switch back under the user.
   capture.clear();
-  MosiFrame stale = on;
-  stale.bytes[DB14] = 0x11;
-  run_frame(stale);
+  run_frame(silent_record(0x20, 0x02));
   check_eq(capture.count(opdata_silent), 0, "a reply already in flight does not bounce the switch");
 
-  // Once the poller asks again the answer is authoritative, and is reported even when it is
-  // unchanged, which is what surfaces a command the AC ignored.
-  bool asked = false;
-  for (int i = 0; i < 900 && !asked; i++) {
-    MisoFrame miso = run_frame(idle_frame((uint8_t)(0x30 + (uint8_t)i)));
-    if (miso.bytes[DB6] == 0xc0 && miso.bytes[DB9] == 0xdd)
-      asked = true;
-  }
-  check(asked, "the poller re-reads Silent Mode after a write");
+  // The controller issues the confirmation read itself. A reply decoded while that request
+  // is still going out was also already on its way, so it must not be accepted either.
+  check(run_until_silent_read(40), "a confirmation read is issued after the write");
+  capture.clear();
+  run_frame(silent_record(0x20, 0x03));
+  check_eq(capture.count(opdata_silent), 0, "a reply predating the request is not accepted");
+
+  // Once the request has finished leaving the wire, the next reply is the answer to it and
+  // is reported even though it is unchanged, which is what surfaces an ignored command.
+  quiet_frame();
+  quiet_frame();
+  capture.clear();
+  run_frame(silent_record(0x20, 0x04));
+  check(capture.has(opdata_silent, 1), "the reply to that read is reported even though unchanged");
+}
+
+static void test_silent_is_still_confirmed_with_polling_off() {
+  printf("Silent Mode is still read back when the operating data poller is off\n");
+  core.set_opdata_polling(false);
+  for (int i = 0; i < 40; i++) quiet_frame();          // let anything pending drain
+
+  core.set_silent(true);
+  check(run_until_silent_read(40), "a confirmation read goes out even with polling off");
+  quiet_frame();
+  quiet_frame();
 
   capture.clear();
-  MosiFrame again = on;
-  again.bytes[DB14] = 0x22;
-  run_frame(again);
-  check(capture.has(opdata_silent, 1), "the fresh reading is reported even though unchanged");
+  run_frame(silent_record(0x00, 0x11));
+  check(capture.has(opdata_silent, 0), "the reply is reported, so the switch cannot latch");
+  core.set_opdata_polling(true);
+}
+
+static void test_two_toggles_never_merge_on_the_wire() {
+  printf("two quick toggles never merge into one run of the write selector\n");
+  core.set_silent(true);
+  int run_len = 0, longest = 0;
+  for (int i = 0; i < 40; i++) {
+    if (i == 2)
+      core.set_silent(false);      // second toggle while the first is still in flight
+    MisoFrame m = quiet_frame();
+    if (m.bytes[DB9] == 0x21) {
+      run_len++;
+      if (run_len > longest) longest = run_len;
+    } else {
+      run_len = 0;
+    }
+  }
+  check(longest > 0, "the write was sent at all");
+  check(longest <= 2, "a Silent command never occupies more than its own frame pair");
+}
+
+// Width of the first operating data request window after the poller has been off for `gap`
+// frames, having run `offset` frames of normal polling first.
+static int request_window_width(int offset, int gap) {
+  core.set_opdata_polling(true);
+  for (int i = 0; i < offset; i++) quiet_frame();
+  core.set_opdata_polling(false);
+  for (int i = 0; i < gap; i++) quiet_frame();
+  core.set_opdata_polling(true);
+
+  int width = 0;
+  bool started = false;
+  for (int i = 0; i < 80; i++) {
+    MisoFrame m = quiet_frame();
+    bool request = (m.bytes[DB9] != 0xff && m.bytes[DB9] != 0x21);
+    if (request) { started = true; width++; }
+    else if (started) break;
+  }
+  return width;
+}
+
+static void test_requests_always_span_a_frame_pair() {
+  printf("switching the poller off and on never truncates a request to one frame\n");
+  int truncated = 0;
+  for (int offset = 0; offset < 20; offset++)
+    for (int gap = 1; gap <= 6; gap++)
+      if (request_window_width(offset, gap) != 2)
+        truncated++;
+  check_eq(truncated, 0, "every request still spans the frame pair the protocol expects");
+}
+
+static void test_poller_collapse_leaves_the_mailbox_idle() {
+  printf("with the poller off and nothing pending, the mailbox stays idle\n");
+  core.set_opdata_polling(false);
+  for (int i = 0; i < 40; i++) quiet_frame();          // let anything pending drain
+
+  for (int i = 0; i < 80; i++) {
+    MisoFrame m = quiet_frame();
+    check_eq(m.bytes[DB6], 0x80, "DB6 idle");
+    check_eq(m.bytes[DB9], 0xff, "DB9 idle");
+    check_eq(m.bytes[DB10], 0xff, "DB10 idle");
+  }
+  core.set_opdata_polling(true);
 }
 
 static void test_all_flags_set_is_a_value_not_a_sentinel() {
-  printf("a DB11 of 0xff is reported rather than mistaken for 'nothing seen yet'\n");
-  core.reset_old_values();
-  capture.clear();
-
-  MosiFrame rec;
-  rec.bytes[DB9] = 0xdd;
-  rec.bytes[DB10] = 0x80;
-  rec.bytes[DB11] = 0xff;   // every flag set, which used to collide with the sentinel
-  rec.bytes[DB12] = 0x00;
-  run_frame(rec);
-  check(capture.has(opdata_silent, 1), "0xff is reported as a real reading");
+  printf("the first reading after a reset is reported whatever its value\n");
+  // Both passes matter: a design that cannot tell "no reading yet" from a real reading goes
+  // silent for whichever value it borrowed as its sentinel.
+  for (int pass = 0; pass < 2; pass++) {
+    uint8_t flags = (pass == 0) ? 0x00 : 0xff;
+    core.reset_old_values();
+    capture.clear();
+    run_frame(silent_record(flags, (uint8_t)(0x50 + pass)));
+    check_eq(capture.count(opdata_silent), 1, "a reading is reported after a reset");
+  }
 }
 
 static void test_unrelated_flags_do_not_re_announce_silent_mode() {
   printf("an unrelated DB11 flag does not re-announce the same Silent Mode state\n");
   core.reset_old_values();
 
-  MosiFrame rec;
-  rec.bytes[DB9] = 0xdd;
-  rec.bytes[DB10] = 0x80;
-  rec.bytes[DB11] = 0x20;
-  rec.bytes[DB12] = 0x00;
-
   capture.clear();
-  run_frame(rec);
+  run_frame(silent_record(0x20, 0x60));
   check(capture.has(opdata_silent, 1), "the first reading is reported");
 
-  // Same Silent Mode bit, some other flag in the byte moved.
   capture.clear();
-  MosiFrame other = rec;
-  other.bytes[DB11] = 0x21;
-  run_frame(other);
+  run_frame(silent_record(0x21, 0x61));   // same Silent bit, some other flag moved
   check_eq(capture.count(opdata_silent), 0, "an unrelated flag is not a Silent Mode change");
 
-  // The bit itself moving is still reported.
   capture.clear();
-  MosiFrame off = rec;
-  off.bytes[DB11] = 0x01;
-  run_frame(off);
+  run_frame(silent_record(0x01, 0x62));   // the Silent bit itself clears
   check(capture.has(opdata_silent, 0), "the Silent Mode bit clearing is still reported");
 }
 
 static void test_repeated_toggles_do_not_starve_the_poller() {
   printf("repeated Silent toggles do not starve the operating data poller\n");
   std::set<int> selectors;
-  for (int i = 0; i < 1200; i++) {
+  for (int i = 0; i < 1600; i++) {
     if (i % 40 == 0)
       core.set_silent((i % 80) == 0);
-    MisoFrame miso = run_frame(idle_frame((uint8_t) i));
-    if (miso.bytes[DB9] != 0xff && miso.bytes[DB9] != 0x21)
-      selectors.insert((miso.bytes[DB6] << 8) | miso.bytes[DB9]);
+    MisoFrame m = quiet_frame();
+    if (m.bytes[DB9] != 0xff && m.bytes[DB9] != 0x21)
+      selectors.insert((m.bytes[DB6] << 8) | m.bytes[DB9]);
   }
   check((int) selectors.size() >= 21, "every operating data selector is still requested");
+}
+
+static void test_frame_filter() {
+  printf("the log's change filter ignores exactly the fields that move every frame\n");
+  using esphome::mhi::normalise_frame;
+  using esphome::mhi::format_hex;
+
+  byte base[33];
+  memset(base, 0, sizeof(base));
+  base[SB0] = 0x6c; base[SB1] = 0x80; base[SB2] = 0x04;
+  base[DB3] = 0x80; base[DB9] = 0xff; base[DB11] = 0x42;
+
+  byte a[33], b[33];
+  normalise_frame(base, a, 20, true);
+
+  // Each of these moves on its own must compare equal.
+  struct { size_t index; uint8_t value; const char *what; } noise[] = {
+    {SB0, 0x6d, "the MOSI signature toggle"},
+    {DB3, 0x81, "the AC's jittering room temperature"},
+    {CBH, 0x99, "the checksum high byte"},
+    {CBL, 0x77, "the checksum low byte"},
+  };
+  for (auto &n : noise) {
+    byte variant[33];
+    memcpy(variant, base, sizeof(variant));
+    variant[n.index] = n.value;
+    normalise_frame(variant, b, 20, true);
+    check(memcmp(a, b, 20) == 0, std::string("ignored: ") + n.what);
+  }
+
+  // A real change must not be.
+  byte real[33];
+  memcpy(real, base, sizeof(real));
+  real[DB11] = 0x43;
+  normalise_frame(real, b, 20, true);
+  check(memcmp(a, b, 20) != 0, "a genuine byte change is still seen");
+
+  // On MISO it is the frame-pair bit that is noise, and DB3 is a real value we send.
+  byte miso_base[33];
+  memset(miso_base, 0, sizeof(miso_base));
+  miso_base[DB3] = 0x9a;
+  miso_base[DB14] = 0x04;
+  normalise_frame(miso_base, a, 20, false);
+  byte miso_toggled[33];
+  memcpy(miso_toggled, miso_base, sizeof(miso_toggled));
+  miso_toggled[DB14] = 0x00;
+  normalise_frame(miso_toggled, b, 20, false);
+  check(memcmp(a, b, 20) == 0, "ignored: the MISO frame-pair bit");
+  miso_toggled[DB3] = 0x9b;
+  normalise_frame(miso_toggled, b, 20, false);
+  check(memcmp(a, b, 20) != 0, "the temperature we send is not treated as noise");
+
+  char text[33 * 3];
+  byte three[3] = {0xA9, 0x00, 0x0f};
+  format_hex(three, 3, text);
+  check(std::string(text) == "A9 00 0F", "hex formatting");
 }
 
 static void test_silent_status_is_polled() {
@@ -370,27 +522,6 @@ static void test_silent_status_is_polled() {
       requested = true;
   }
   check(requested, "a C0/DD read request is issued during an opdata cycle");
-}
-
-static void test_poller_can_be_collapsed() {
-  printf("the operating data poller can be silenced for frame analysis\n");
-
-  core.set_opdata_polling(false);
-  for (int i = 0; i < 80; i++) {
-    MisoFrame miso = run_frame(idle_frame((uint8_t)(0xa0 + (uint8_t)i)));
-    check_eq(miso.bytes[DB6], 0x80, "DB6 stays idle while polling is off");
-    check_eq(miso.bytes[DB9], 0xff, "DB9 stays idle while polling is off");
-    check_eq(miso.bytes[DB10], 0xff, "DB10 stays idle while polling is off");
-  }
-
-  core.set_opdata_polling(true);
-  bool resumed = false;
-  for (int i = 0; i < 80 && !resumed; i++) {
-    MisoFrame miso = run_frame(idle_frame((uint8_t)(0xe0 + (uint8_t)i)));
-    if (miso.bytes[DB9] != 0xff)
-      resumed = true;
-  }
-  check(resumed, "polling resumes when switched back on");
 }
 
 static void test_silent_write_still_works_with_polling_off() {
@@ -446,12 +577,16 @@ int main() {
   test_status_record_is_decoded();
   test_status_record_is_not_confused_with_other_records();
   test_unsolicited_status_record_is_decoded();
-  test_confirmation_waits_for_a_fresh_read();
+  test_a_write_is_confirmed_by_its_own_read();
+  test_silent_is_still_confirmed_with_polling_off();
+  test_two_toggles_never_merge_on_the_wire();
+  test_requests_always_span_a_frame_pair();
+  test_poller_collapse_leaves_the_mailbox_idle();
   test_all_flags_set_is_a_value_not_a_sentinel();
   test_unrelated_flags_do_not_re_announce_silent_mode();
   test_repeated_toggles_do_not_starve_the_poller();
+  test_frame_filter();
   test_silent_status_is_polled();
-  test_poller_can_be_collapsed();
   test_silent_write_still_works_with_polling_off();
   test_frame_observer();
 

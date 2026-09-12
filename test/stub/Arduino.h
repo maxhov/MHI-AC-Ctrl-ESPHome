@@ -45,6 +45,8 @@ extern int MISO_PIN;
 struct MhiFakeBus {
   uint8_t mosi[33];       // bytes the AC clocks towards the controller
   uint8_t miso[33];       // bytes the controller clocked back, captured here
+  uint8_t miso_driven[33];// which of those bytes were actually clocked out at all, so that
+                          // a byte nobody wrote is distinguishable from one written as 0x00
   uint8_t frame_size;
   uint16_t bit_pos;       // position within the frame, LSB first
   unsigned long millis;   // virtual clock, only advances while SCK idles high
@@ -79,6 +81,9 @@ inline int digitalRead(int pin) {
 }
 
 inline void digitalWrite(int pin, int value) {
-  if (pin == MISO_PIN && value)
+  if (pin != MISO_PIN)
+    return;
+  mhi_bus.miso_driven[mhi_bus.bit_pos / 8] = 1;
+  if (value)
     mhi_bus.miso[mhi_bus.bit_pos / 8] |= (uint8_t)(1u << (mhi_bus.bit_pos % 8));
 }

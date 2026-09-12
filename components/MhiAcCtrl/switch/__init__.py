@@ -4,7 +4,7 @@ from esphome.components import switch
 
 from esphome.const import (
     DEVICE_CLASS_SWITCH,
-    ENTITY_CATEGORY_CONFIG,
+    ENTITY_CATEGORY_DIAGNOSTIC,
 )
 
 from .. import MhiAcCtrl, CONF_MHI_AC_CTRL_ID
@@ -26,30 +26,36 @@ ICON_POLLING="mdi:database-sync"
 
 CONFIG_SCHEMA = cv.Schema({    
     cv.GenerateID(CONF_MHI_AC_CTRL_ID): cv.use_id(MhiAcCtrl),
+    # restore_mode is pinned to DISABLED throughout. None of these switches restore a
+    # remembered state: the AC reports Silent Mode itself, and the two diagnostics force
+    # their safe state in setup(). Saying so explicitly is ESPHome's idiom, and it stops
+    # restore_mode being an accepted key that quietly does nothing.
     cv.Optional(CONF_VANES_3D_AUTO): switch.switch_schema(
         Mhi3dAutoSwitch,
         device_class=DEVICE_CLASS_SWITCH,
         icon=ICON_3D,
-    ),
-    # No restore mode is set: no switch here calls restore_state_(), so none of them write
-    # a remembered state on boot. The AC reports its own Silent Mode state instead.
+        default_restore_mode="DISABLED",
+    ).extend(cv.COMPONENT_SCHEMA),
     cv.Optional(CONF_SILENT_MODE): switch.switch_schema(
         MhiSilentSwitch,
         device_class=DEVICE_CLASS_SWITCH,
         icon=ICON_SILENT,
-    ),
-    # Both diagnostics force their safe state in setup(), so the restore mode is irrelevant:
-    # logging always boots off, polling always boots on.
+        default_restore_mode="DISABLED",
+    ).extend(cv.COMPONENT_SCHEMA),
+    # Diagnostics, not settings: they are reset at every boot, so DIAGNOSTIC is what HA
+    # should show. CONFIG would put them beside things a user reasonably expects to stick.
     cv.Optional(CONF_SPI_LOGGING): switch.switch_schema(
         MhiSpiLogSwitch,
         icon=ICON_SPI_LOG,
-        entity_category=ENTITY_CATEGORY_CONFIG,
-    ),
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        default_restore_mode="DISABLED",
+    ).extend(cv.COMPONENT_SCHEMA),
     cv.Optional(CONF_OPDATA_POLLING): switch.switch_schema(
         MhiOpdataPollingSwitch,
         icon=ICON_POLLING,
-        entity_category=ENTITY_CATEGORY_CONFIG,
-    ),
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        default_restore_mode="DISABLED",
+    ).extend(cv.COMPONENT_SCHEMA),
 })
 
 async def to_code(config):

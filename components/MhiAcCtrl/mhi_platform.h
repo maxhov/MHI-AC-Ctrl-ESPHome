@@ -54,6 +54,8 @@ private:
     bool spi_logging_ = false;
     bool have_previous_frame_ = false;
     uint32_t frame_sequence_ = 0;
+    uint32_t rejected_since_log_ = 0;
+    uint32_t last_reject_log_frame_ = 0;
     byte previous_mosi_[33] = {0};
     byte previous_miso_[33] = {0};
     float last_room_temperature_ = NAN; 

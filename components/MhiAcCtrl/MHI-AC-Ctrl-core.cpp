@@ -59,6 +59,9 @@ void MHI_AC_Ctrl_Core::init() {
   pinMode(MOSI_PIN, INPUT);
   pinMode(MISO_PIN, OUTPUT);
   MHI_AC_Ctrl_Core::reset_old_values();
+  // Read Silent Mode once at startup, so the switch does not assert a state it has never
+  // been told for the length of a whole operating data cycle.
+  silent_phase = silent_confirm_due;
 }
 
 void MHI_AC_Ctrl_Core::set_power(boolean power) {
@@ -93,10 +96,6 @@ void MHI_AC_Ctrl_Core::set_vanes(uint vanes) {
 
 void MHI_AC_Ctrl_Core::set_silent(boolean silent) {
   new_Silent = 0b10 | silent;
-  // Only a reading requested after the write can confirm it. Forgetting the cached state
-  // here instead would also accept a reply that was already in flight, which still carries
-  // the old state and would bounce the switch back; see the opdata request in loop().
-  silent_confirm_pending = true;
 }
 
 void MHI_AC_Ctrl_Core::set_opdata_polling(boolean on) {
@@ -137,19 +136,9 @@ void MHI_AC_Ctrl_Core::set_frame_size(byte framesize) {
 
 int MHI_AC_Ctrl_Core::loop(uint max_time_ms) {
   const byte opdataCnt = sizeof(opdata) / sizeof(byte) / 2;
-  static byte opdataNo = 0;               //
   long startMillis = millis();             // start time of this loop run
   byte MOSI_byte;                         // received MOSI byte
   bool new_datapacket_received = false;   // indicated that a new frame was received
-  static byte erropdataCnt = 0;           // number of expected error operating data
-  static bool doubleframe = false;
-  static int frame = 1;
-  static byte silentFramesLeft = 0;       // frames left to transmit a pending Silent Mode command
-  static byte silentValue = 0;
-static byte MOSI_frame[33];
-  //                            sb0   sb1   sb2   db0   db1   db2   db3   db4   db5   db6   db7   db8   db9  db10  db11  db12  db13  db14  chkH  chkL  db15  db16  db17  db18  db19  db20  db21  db22  db23  db24  db25  db26  chk2L
-  static byte MISO_frame[] = { 0xA9, 0x00, 0x07, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x22 };
-
   static uint call_counter = 0;           // counts how often this loop was called
   static unsigned long lastTroomInternalMillis = 0; // remember when Troom internal has changed
   if (frameSize == 33)
@@ -169,15 +158,6 @@ static byte MOSI_frame[33];
   doubleframe = !doubleframe;             // toggle every frame
   MISO_frame[DB14] = doubleframe << 2;    // MISO_frame[DB14] bit2 toggles with every frame
 
-  // Silent Mode is not one of the fixed setting bits, it is a service write command that
-  // occupies DB6/DB9/DB10 for a whole frame pair. Start it on a doubleframe, and hold it
-  // back while error operating data is being collected so the two never overlap.
-  if (doubleframe && silentFramesLeft == 0 && erropdataCnt == 0 && new_Silent != 0) {
-    silentValue = new_Silent & 0x01;
-    silentFramesLeft = 2;
-    new_Silent = 0;
-  }
-  
   // Requesting all different opdata's is an opdata cycle. A cycle will take 20s.
   // With the current 21 different opdata's, every opdata request will take about 1sec (interval).
   // If there are only 5 different opdata's defined, these 5 will be spread about the 20s cycle. The interval will increase.
@@ -185,44 +165,95 @@ static byte MOSI_frame[33];
   if ((frame > (NoFramesPerOpDataCycle / opdataCnt)) && doubleframe ) {    // interval for requesting new opdata depending on de number of opdata requests
     frame = 1;                              // start requesting new OpData
   }
+  const bool opdata_due = (frame == 1);
+  frame++;                                  // advances on every frame, so the opdata window
+                                            // keeps step with doubleframe even while polling
+                                            // is switched off
 
-  if (!opdata_polling) {                    // analysis mode: leave the service mailbox idle
-    MISO_frame[DB6] = 0x80;
-    MISO_frame[DB9] = 0xff;
+  // ---- service mailbox ---------------------------------------------------------------
+  // DB6, DB9 and DB10 are shared by every service transaction: operating data reads, the
+  // Silent Mode write, its confirmation read, and the error data request. They are written
+  // from here and nowhere else, so no transaction can cut into another's frames.
+  //
+  // A transaction owns the mailbox for a frame pair starting on a doubleframe, and the
+  // mailbox is then held idle for a further pair. Without that gap two transactions run
+  // together on the wire as one longer run, which for two quick Silent toggles would look
+  // like a single command with the payload changing underneath it.
+  if (mailbox_send > 0)
+    mailbox_send--;
+  if (mailbox_hold > 0)
+    mailbox_hold--;
+
+  if (mailbox_send == 0 && mailbox_owner != mailbox_idle) {
+    // The payload has finished leaving the wire, so anything waiting on it can move on.
+    if (mailbox_owner == mailbox_silent_write) {
+      silent_phase = silent_confirm_due;
+    }
+    else if (mailbox_owner == mailbox_silent_read) {
+      // Only now can a reply describe the state after the write. Anything decoded earlier
+      // in this frame was already on its way before the request went out.
+      silent_phase = silent_awaiting_reply;
+      op_silent_known = false;
+    }
+    mailbox_owner = mailbox_idle;
+    mailbox_db6 = 0x80;
+    mailbox_db9 = 0xff;
+    mailbox_db10 = 0xff;
   }
-  else if (frame++ <= 2) {                  // use opdata request only for 2 subsequent frames
-    if (doubleframe) {                      // start when MISO_frame[DB14] bit2 is set
-      if (erropdataCnt == 0 && silentFramesLeft == 0) {
-        MISO_frame[DB6] = pgm_read_word(opdata + opdataNo);
-        MISO_frame[DB9] = pgm_read_word(opdata + opdataNo) >> 8;
-        // Forget the cached Silent Mode state when re-reading it after a write, so that the
-        // reply is reported even when unchanged. That is what reveals a command the AC
-        // ignored, and only the reply to this request can settle it.
-        if (silent_confirm_pending && MISO_frame[DB6] == 0xc0 && MISO_frame[DB9] == 0xdd) {
-          op_silent_known = false;
-          silent_confirm_pending = false;
-        }
-        opdataNo = (opdataNo + 1) % opdataCnt;
-      }
 
+  if (doubleframe && erropdataCnt > 0)
+    erropdataCnt--;                         // the AC is streaming error operating data
+
+  if (mailbox_hold == 0 && doubleframe && erropdataCnt == 0) {
+    if (new_Silent != 0) {                  // a user action outranks the rest
+      mailbox_db6 = 0x80;
+      mailbox_db9 = 0x21;
+      mailbox_db10 = new_Silent & 0x01;
+      new_Silent = 0;
+      mailbox_owner = mailbox_silent_write;
+      mailbox_send = 2;
+      mailbox_hold = 4;
+    }
+    else if (silent_phase == silent_confirm_due) {
+      // Confirm with a read of our own rather than waiting for the operating data cycle to
+      // come round: that cycle can be switched off for frame analysis, and the {0xc0,0xdd}
+      // row can be commented out of the opdata table.
+      mailbox_db6 = 0xc0;
+      mailbox_db9 = 0xdd;
+      mailbox_db10 = 0xff;
+      silent_phase = silent_confirm_sent;
+      mailbox_owner = mailbox_silent_read;
+      mailbox_send = 2;
+      mailbox_hold = 4;
+    }
+    else if (request_erropData) {
+      mailbox_db6 = 0x80;
+      mailbox_db9 = 0x45;
+      mailbox_db10 = 0xff;
+      request_erropData = false;
+      mailbox_owner = mailbox_errdata;
+      mailbox_send = 2;
+      mailbox_hold = 4;
+    }
+    else if (opdata_polling && opdata_due) {
+      mailbox_db6 = pgm_read_word(opdata + opdataNo);
+      mailbox_db9 = pgm_read_word(opdata + opdataNo) >> 8;
+      mailbox_db10 = 0xff;
+      opdataNo = (opdataNo + 1) % opdataCnt;
+      mailbox_owner = mailbox_opdata;
+      mailbox_send = 2;
+      mailbox_hold = 4;
     }
   }
-  else  // reset OpData request
-  {
-    MISO_frame[DB6] = 0x80;
-    MISO_frame[DB9] = 0xff;    
-  }
-  
+
+  MISO_frame[DB6] = mailbox_db6;
+  MISO_frame[DB9] = mailbox_db9;
+  MISO_frame[DB10] = mailbox_db10;
+
   if (doubleframe) {                        // and the other MISO data changes are updated when MISO_frame[DB14] bit2 is set
     MISO_frame[DB0] = 0x00;
     MISO_frame[DB1] = 0x00;
     MISO_frame[DB2] = 0x00;
-
-    if (erropdataCnt > 0) {                 // error operating data available
-      MISO_frame[DB6] = 0x80;
-      MISO_frame[DB9] = 0xff;
-      erropdataCnt--;
-    }
 
     // set Power, Mode, Tsetpoint, Fan, Vanes
     MISO_frame[DB0] = new_Power;
@@ -242,25 +273,6 @@ static byte MOSI_frame[33];
     new_Vanes0 = 0;
     new_Vanes1 = 0;
 
-    // request_ErrOpData() has no caller anywhere in the component, so this branch never
-    // runs today. The guard is here so it stays correct if it is ever wired up.
-    if (request_erropData && silentFramesLeft == 0) {
-      MISO_frame[DB6] = 0x80;
-      MISO_frame[DB9] = 0x45;
-      request_erropData = false;
-    }
-  }
-
-  // Applied after the other MISO writers so the command survives the frame it was
-  // scheduled for; DB10 goes back to idle once it has been sent.
-  if (silentFramesLeft > 0) {
-    MISO_frame[DB6] = 0x80;
-    MISO_frame[DB9] = 0x21;
-    MISO_frame[DB10] = silentValue;
-    silentFramesLeft--;
-  }
-  else {
-    MISO_frame[DB10] = 0xff;              // read requests expect an idle DB10
   }
 
   MISO_frame[DB3] = new_Troom;  // from MQTT or DS18x20
@@ -651,12 +663,21 @@ static byte MOSI_frame[33];
           // Only bit 5 is reported, so only bit 5 is remembered. Caching the whole byte
           // re-announced the same Silent Mode state whenever an unrelated flag moved.
           byte silent_flag = MOSI_frame[DB11] & 0x20;
+          if (silent_phase == silent_awaiting_reply)
+            silent_phase = silent_settled;    // the answer to our own confirmation read
           if (!op_silent_known || silent_flag != op_silent_old) {
             op_silent_old = silent_flag;
             op_silent_known = true;
             m_cbiStatus->cbiStatusFunction(opdata_silent, silent_flag != 0);
           }
         }
+        else
+          // A different layout means this model encodes Silent Mode some other way. Report
+          // it as unknown rather than swallowing it: that record is the evidence anyone
+          // reporting an unsupported model needs.
+          m_cbiStatus->cbiStatusFunction(opdata_unknown, MOSI_frame[DB10] << 8 | MOSI_frame[DB9]);
+        break;
+      case 0x21:  // our own Silent Mode write selector echoed back, nothing to report
         break;
       case 0x45: // last error number or count of following error operating data
         if ((MOSI_frame[DB6] & 0x80) != 0) {
