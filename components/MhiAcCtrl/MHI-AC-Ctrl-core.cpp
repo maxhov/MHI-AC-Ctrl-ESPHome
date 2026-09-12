@@ -97,6 +97,10 @@ void MHI_AC_Ctrl_Core::set_silent(boolean silent) {
                           // command the AC ignored does not leave the switch out of sync
 }
 
+void MHI_AC_Ctrl_Core::set_opdata_polling(boolean on) {
+  opdata_polling = on;
+}
+
 void MHI_AC_Ctrl_Core::set_vanesLR(uint vanesLR) {
   if (vanesLR == vanesLR_swing) {
     new_VanesLR0 = 0b00001011; // enable swing
@@ -180,7 +184,11 @@ static byte MOSI_frame[33];
     frame = 1;                              // start requesting new OpData
   }
 
-  if (frame++ <= 2) {                       // use opdata request only for 2 subsequent frames
+  if (!opdata_polling) {                    // analysis mode: leave the service mailbox idle
+    MISO_frame[DB6] = 0x80;
+    MISO_frame[DB9] = 0xff;
+  }
+  else if (frame++ <= 2) {                  // use opdata request only for 2 subsequent frames
     if (doubleframe) {                      // start when MISO_frame[DB14] bit2 is set
       if (erropdataCnt == 0 && silentFramesLeft == 0) {
         MISO_frame[DB6] = pgm_read_word(opdata + opdataNo);
@@ -305,16 +313,20 @@ static byte MOSI_frame[33];
 #undef MHI_MISO_WRITE
 
   checksum = calc_checksum(MOSI_frame);
+  int frame_status = err_msg_valid_frame;
   if (((MOSI_frame[SB0] & 0xfe) != 0x6c) | (MOSI_frame[SB1] != 0x80) | (MOSI_frame[SB2] != 0x04))
-    return err_msg_invalid_signature;
-  if ((MOSI_frame[CBH] << 8 | MOSI_frame[CBL]) != checksum)
-    return err_msg_invalid_checksum;
+    frame_status = err_msg_invalid_signature;
+  else if ((MOSI_frame[CBH] << 8 | MOSI_frame[CBL]) != checksum)
+    frame_status = err_msg_invalid_checksum;
+  else if (frameSize == 33)   // Only for framesize 33 (WF-RAC)
+    if (MOSI_frame[CBL2] != lowByte(calc_checksumFrame33(MOSI_frame)))
+      frame_status = err_msg_invalid_checksum;
 
-  if (frameSize == 33) { // Only for framesize 33 (WF-RAC)
-    checksum = calc_checksumFrame33(MOSI_frame);
-    if ( MOSI_frame[CBL2] != lowByte(checksum ) ) 
-      return err_msg_invalid_checksum;
-  }
+  if (m_cbiFrame != nullptr)
+    m_cbiFrame->cbiFrameFunction(MOSI_frame, MISO_frame, frameSize, frame_status);
+
+  if (frame_status != err_msg_valid_frame)
+    return frame_status;
 
   if (new_datapacket_received) {
 

@@ -72,6 +72,29 @@ class StatusCapture : public CallbackInterface_Status {
 };
 
 static StatusCapture capture;
+
+struct FrameEvent {
+  uint8_t mosi[33];
+  uint8_t miso[33];
+  int frame_size;
+  int status;
+};
+
+class FrameCapture : public CallbackInterface_Frame {
+ public:
+  std::vector<FrameEvent> events;
+  void cbiFrameFunction(const byte *mosi, const byte *miso, byte frame_size, int status) override {
+    FrameEvent e;
+    memcpy(e.mosi, mosi, 33);
+    memcpy(e.miso, miso, 33);
+    e.frame_size = frame_size;
+    e.status = status;
+    this->events.push_back(e);
+  }
+  void clear() { this->events.clear(); }
+};
+
+static FrameCapture frames;
 static MHI_AC_Ctrl_Core core;
 
 // A signature-correct, checksum-correct frame from the indoor unit.
@@ -103,14 +126,17 @@ struct MisoFrame {
   int result;
 };
 
-static MisoFrame run_frame(MosiFrame mosi) {
-  mosi.seal();
+static MisoFrame run_frame_raw(MosiFrame mosi, bool seal) {
+  if (seal)
+    mosi.seal();
   mhi_bus_begin_frame(mosi.bytes, 20);
   MisoFrame out;
   out.result = core.loop(100);
   memcpy(out.bytes, mhi_bus.miso, sizeof(out.bytes));
   return out;
 }
+
+static MisoFrame run_frame(MosiFrame mosi) { return run_frame_raw(mosi, true); }
 
 // Frames are only parsed when something changed, so nudge a byte the core does
 // not interpret when a test needs two look-alike frames back to back.
@@ -273,8 +299,70 @@ static void test_silent_status_is_polled() {
   check(requested, "a C0/DD read request is issued during an opdata cycle");
 }
 
+static void test_poller_can_be_collapsed() {
+  printf("the operating data poller can be silenced for frame analysis\n");
+
+  core.set_opdata_polling(false);
+  for (int i = 0; i < 80; i++) {
+    MisoFrame miso = run_frame(idle_frame((uint8_t)(0xa0 + (uint8_t)i)));
+    check_eq(miso.bytes[DB6], 0x80, "DB6 stays idle while polling is off");
+    check_eq(miso.bytes[DB9], 0xff, "DB9 stays idle while polling is off");
+    check_eq(miso.bytes[DB10], 0xff, "DB10 stays idle while polling is off");
+  }
+
+  core.set_opdata_polling(true);
+  bool resumed = false;
+  for (int i = 0; i < 80 && !resumed; i++) {
+    MisoFrame miso = run_frame(idle_frame((uint8_t)(0xe0 + (uint8_t)i)));
+    if (miso.bytes[DB9] != 0xff)
+      resumed = true;
+  }
+  check(resumed, "polling resumes when switched back on");
+}
+
+static void test_silent_write_still_works_with_polling_off() {
+  printf("a Silent command still goes out while the poller is collapsed\n");
+  core.set_opdata_polling(false);
+  core.set_silent(true);
+  int sent = 0;
+  for (int i = 0; i < 6; i++) {
+    MisoFrame miso = run_frame(idle_frame((uint8_t)(0x10 + (uint8_t)i)));
+    if (miso.bytes[DB9] == 0x21) {
+      sent++;
+      check_eq(miso.bytes[DB10], 0x01, "Silent ON still carried");
+    }
+  }
+  check_eq(sent, 2, "command still sent on one frame pair");
+  core.set_opdata_polling(true);
+}
+
+static void test_frame_observer() {
+  printf("every completed frame reaches the observer, valid or not\n");
+
+  frames.clear();
+  run_frame(idle_frame(0x05));
+  check_eq((int) frames.events.size(), 1, "one callback per frame");
+  if (!frames.events.empty()) {
+    check_eq(frames.events[0].status, err_msg_valid_frame, "a good frame reports as valid");
+    check_eq(frames.events[0].frame_size, 20, "frame size is reported");
+    check_eq(frames.events[0].mosi[SB1], 0x80, "the MOSI frame is handed over");
+    check_eq(frames.events[0].miso[SB0], 0xA9, "the MISO frame is handed over");
+  }
+
+  // A frame whose checksum was never written must still be observable, and must still
+  // be rejected by loop().
+  frames.clear();
+  MosiFrame broken = idle_frame(0x06);
+  MisoFrame out = run_frame_raw(broken, false);
+  check_eq((int) frames.events.size(), 1, "a rejected frame is still handed over");
+  if (!frames.events.empty())
+    check_eq(frames.events[0].status, err_msg_invalid_checksum, "the rejection reason is reported");
+  check_eq(out.result, err_msg_invalid_checksum, "loop() still rejects it");
+}
+
 int main() {
   core.MHIAcCtrlStatus(&capture);
+  core.MHIAcCtrlFrame(&frames);
   core.init();
   core.set_frame_size(20);
 
@@ -287,6 +375,9 @@ int main() {
   test_unsolicited_status_record_is_decoded();
   test_state_is_resynced_after_a_command();
   test_silent_status_is_polled();
+  test_poller_can_be_collapsed();
+  test_silent_write_still_works_with_polling_off();
+  test_frame_observer();
 
   printf("\n%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

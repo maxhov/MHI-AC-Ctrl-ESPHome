@@ -1,5 +1,7 @@
 #include "mhi_platform.h"
 
+#include <string.h>
+
 int SCK_PIN = 14;
 int MOSI_PIN = 13;
 int MISO_PIN = 12;
@@ -22,6 +24,7 @@ void MhiPlatform::setup() {
     }
 
     this->mhi_ac_ctrl_core_.MHIAcCtrlStatus(this);
+    this->mhi_ac_ctrl_core_.MHIAcCtrlFrame(this);
     this->mhi_ac_ctrl_core_.init();
     this->mhi_ac_ctrl_core_.set_frame_size(this->frame_size_); // set framesize. Only 20 (legacy) or 33 (includes 3D auto and vertical vanes) possible
 
@@ -199,6 +202,82 @@ void MhiPlatform::set_3Dauto(bool value) {
 void MhiPlatform::set_silent(bool value) {
     this->mhi_ac_ctrl_core_.set_silent(value);
     ESP_LOGD(TAG, "set silent mode: %i", value);
+}
+
+namespace {
+
+// Three fields change on every single frame by design: the MOSI signature toggle, the MISO
+// frame-pair bit and the checksums. Blanking them is what lets a genuine one-byte change
+// stand out instead of drowning in noise.
+void normalise_frame(const byte* source, byte* target, byte frame_size, bool is_mosi) {
+    memcpy(target, source, frame_size);
+    if (is_mosi)
+        target[SB0] &= 0xfe;
+    else
+        target[DB14] &= ~0x04;
+    target[CBH] = 0;
+    target[CBL] = 0;
+    if (frame_size == 33)
+        target[CBL2] = 0;
+}
+
+void format_hex(const byte* frame, byte frame_size, char* target) {
+    // Not named HEX: Arduino already defines that as the number base 16.
+    static const char hex_digits[] = "0123456789ABCDEF";
+    for (byte i = 0; i < frame_size; i++) {
+        if (i != 0)
+            *target++ = ' ';
+        *target++ = hex_digits[frame[i] >> 4];
+        *target++ = hex_digits[frame[i] & 0x0f];
+    }
+    *target = '\0';
+}
+
+}  // namespace
+
+void MhiPlatform::set_spi_logging(bool value) {
+    this->spi_logging_ = value;
+    if (value)
+        this->have_previous_frame_ = false;  // start a capture with a baseline frame
+    ESP_LOGI(TAG, "SPI frame logging %s", value ? "enabled" : "disabled");
+}
+
+void MhiPlatform::set_opdata_polling(bool value) {
+    this->mhi_ac_ctrl_core_.set_opdata_polling(value);
+    ESP_LOGI(TAG, "operating data polling %s", value ? "enabled" : "disabled");
+}
+
+void MhiPlatform::cbiFrameFunction(const byte* mosi_frame, const byte* miso_frame, byte frame_size, int status) {
+    this->frame_sequence_++;
+    if (!this->spi_logging_)
+        return;
+
+    // Frames arrive about 20 times a second. Formatting and shipping every one of them costs
+    // more than the frame interval allows and disturbs the very SPI timing being investigated,
+    // so only frames that actually changed are logged. Switch the operating data polling off
+    // as well and a settled unit goes quiet, which is what makes a remote keypress obvious.
+    byte mosi_now[33];
+    byte miso_now[33];
+    normalise_frame(mosi_frame, mosi_now, frame_size, true);
+    normalise_frame(miso_frame, miso_now, frame_size, false);
+
+    bool changed = !this->have_previous_frame_
+        || memcmp(mosi_now, this->previous_mosi_, frame_size) != 0
+        || memcmp(miso_now, this->previous_miso_, frame_size) != 0;
+
+    if (!changed && status == err_msg_valid_frame)
+        return;
+
+    memcpy(this->previous_mosi_, mosi_now, frame_size);
+    memcpy(this->previous_miso_, miso_now, frame_size);
+    this->have_previous_frame_ = true;
+
+    char mosi_hex[33 * 3];
+    char miso_hex[33 * 3];
+    format_hex(mosi_frame, frame_size, mosi_hex);
+    format_hex(miso_frame, frame_size, miso_hex);
+
+    ESP_LOGI(TAG, "#%u status=%i MOSI %s | MISO %s", this->frame_sequence_, status, mosi_hex, miso_hex);
 }
 
 void MhiPlatform::add_listener(MhiStatusListener* listener) {

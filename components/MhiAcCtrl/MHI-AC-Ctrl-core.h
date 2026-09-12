@@ -113,6 +113,13 @@ class CallbackInterface_Status {
   public: virtual void cbiStatusFunction(ACStatus status, int value) = 0;
 };
 
+// Optional observer for raw frames, used for protocol analysis. It is handed every frame
+// that completed a transfer, valid or not, together with the matching ErrMsg so that a
+// rejected frame can be logged rather than silently dropped.
+class CallbackInterface_Frame {
+  public: virtual void cbiFrameFunction(const byte* mosi_frame, const byte* miso_frame, byte frame_size, int status) = 0;
+};
+
 class MHI_AC_Ctrl_Core {
   private:
     // old status
@@ -168,10 +175,16 @@ class MHI_AC_Ctrl_Core {
     byte frameSize = 20;
 
     CallbackInterface_Status *m_cbiStatus;
+    CallbackInterface_Frame *m_cbiFrame = nullptr;
+    bool opdata_polling = true;
 
   public:
     void MHIAcCtrlStatus(CallbackInterface_Status *cb) {
       m_cbiStatus = cb;
+    };
+
+    void MHIAcCtrlFrame(CallbackInterface_Frame *cb) {
+      m_cbiFrame = cb;
     };
 
 
@@ -191,5 +204,6 @@ class MHI_AC_Ctrl_Core {
     void set_3Dauto(AC3Dauto Dauto);      // set the requested 3D auto mode
     void set_vanesLR(uint vanesLR);       // set the vanes vertical position
     void set_silent(boolean silent);      // switch the outdoor unit quiet function (Silent Mode) on/off
+    void set_opdata_polling(boolean on);  // stop requesting operating data, to keep the service mailbox quiet
 
 };

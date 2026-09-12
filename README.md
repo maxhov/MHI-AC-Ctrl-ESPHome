@@ -64,6 +64,50 @@ Protocol details, reverse engineered by [@mreijnde](https://github.com/mreijnde)
 > Confirmed on an SCM60ZS-W. Silent Mode is not documented by MHI, so if your unit does not
 > respond to the switch, please report the model in the issue above.
 
+# SPI frame logging
+
+Two optional switches help work out what the undocumented bytes in the protocol mean. Both
+are in [`examples/full.yaml`](examples/full.yaml):
+
+```yaml
+switch:
+  - platform: MhiAcCtrl
+    spi_logging:
+      name: "SPI logging"
+    operating_data_polling:
+      name: "Operating data polling"
+```
+
+`spi_logging` dumps frames to the ESPHome log as hex, MOSI alongside MISO. `operating_data_polling`
+turns the operating data requests off, which stops the service mailbox bytes churning.
+
+**Only changed frames are logged.** Frames arrive about 20 times a second, and formatting and
+shipping every one of them costs more than the frame interval allows, which disturbs the very
+SPI timing you are trying to observe. The signature toggle, the frame-pair bit and the
+checksums are ignored when deciding whether a frame changed, since those move every frame by
+design. Rejected frames are always logged, whether they changed or not.
+
+To hunt for an unknown field:
+
+1. Turn `operating_data_polling` **off**. A settled unit then goes almost silent, because the
+   mailbox stops rotating through its selectors. Every operating data sensor stops updating
+   until you turn it back on.
+2. Turn `spi_logging` **on**. The first frame is logged as a baseline.
+3. Capture to a file with `esphome logs your-device.yaml > capture.log 2>&1`.
+4. Press one button on the remote. Press one, not several.
+5. A byte that moves only on the keypress and then stays put is your candidate. Repeat it a
+   few times before believing it.
+
+Then turn both switches back: logging always starts off after a reboot, and polling always
+starts on, so a reboot is enough if you forget.
+
+Bear in mind that the IR remote talks to the indoor unit directly, not across this bus, so a
+keypress shows up as the resulting *state* on MOSI. That is enough to identify a field, and
+for the cyclic fields it is usually enough to control one too, because those carry a matching
+"set" indicator bit in the same position. It is not enough to derive a service write command:
+those use a different selector entirely, which is why `C0/DD` reads Silent Mode but `80/21`
+writes it.
+
 # Low temperature heating and cooling
 
 To allow for lower temperature heating or cooling, set the visual_min_temperature in the climate section of the yaml like so:
@@ -87,6 +131,7 @@ This will allow for lower temperature heating or cooling.
 
 **Unreleased**
  - Silent Mode switch: read and control the outdoor unit quiet function https://github.com/ginkage/MHI-AC-Ctrl-ESPHome/issues/166
+ - `spi_logging` and `operating_data_polling` switches for protocol analysis
  - Host-side tests for the SPI framing in `test/`
 
 **v4.2** (2025-07)

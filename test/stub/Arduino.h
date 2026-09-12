@@ -17,6 +17,14 @@ typedef unsigned int uint;
 #define LOW 0
 #define PROGMEM
 
+// Arduino claims these names as number bases for Serial.print(). They are defined here so
+// that a collision with a local identifier fails on the host too, rather than only when
+// somebody builds the firmware.
+#define DEC 10
+#define HEX 16
+#define OCT 8
+#define BIN 2
+
 #define highByte(w) ((uint8_t)((uint16_t)(w) >> 8))
 #define lowByte(w) ((uint8_t)((uint16_t)(w) & 0xff))
 
