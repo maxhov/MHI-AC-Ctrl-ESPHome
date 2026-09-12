@@ -24,6 +24,7 @@ const byte opdata[][2] PROGMEM = {
   { 0x40, 0x1e},  // 37 "TOTAL-COMP-RUN" [h]
   { 0x40, 0x13},  // 38 "OU-EEV" [Puls]
   { 0xc0, 0x94},  //    "energy-used" [kWh]
+  { 0xc0, 0xdd},  //    "silent mode" (outdoor unit quiet function)
 
 };
 
@@ -80,7 +81,7 @@ enum ACStatus { // Status enum
   status_power = type_status, status_mode, status_fan, status_vanes, status_vanesLR, status_3Dauto, status_troom, status_tsetpoint, status_errorcode,
   opdata_mode = type_opdata, opdata_kwh, opdata_tsetpoint, opdata_return_air, opdata_outdoor, opdata_tho_r1, opdata_iu_fanspeed, opdata_thi_r1, opdata_thi_r2, opdata_thi_r3,
   opdata_ou_fanspeed, opdata_total_iu_run, opdata_total_comp_run, opdata_comp, opdata_ct, opdata_td,
-  opdata_tdsh, opdata_protection_no, opdata_defrost, opdata_ou_eev1, opdata_unknown,
+  opdata_tdsh, opdata_protection_no, opdata_defrost, opdata_ou_eev1, opdata_silent, opdata_unknown,
   erropdata_mode = type_erropdata, erropdata_tsetpoint, erropdata_return_air, erropdata_thi_r1, erropdata_thi_r2, erropdata_thi_r3,
   erropdata_iu_fanspeed, erropdata_total_iu_run, erropdata_outdoor, erropdata_tho_r1, erropdata_comp, erropdata_td, erropdata_ct, erropdata_ou_fanspeed,
   erropdata_total_comp_run, erropdata_ou_eev1, erropdata_errorcode
@@ -108,8 +109,26 @@ enum AC3Dauto {  // 3D auto enum
   Dauto_off = 0b00000000, Dauto_on = 0b00000100
 };
 
+// What currently owns the service mailbox. DB6/DB9/DB10 carry one transaction at a time.
+enum MailboxOwner {
+  mailbox_idle = 0, mailbox_opdata, mailbox_silent_write, mailbox_silent_read, mailbox_errdata
+};
+
+// Where a Silent Mode change has got to. A write is only believed once a reading requested
+// after it, and fully clocked out, has been answered.
+enum SilentPhase {
+  silent_settled = 0, silent_confirm_due, silent_confirm_sent, silent_awaiting_reply
+};
+
 class CallbackInterface_Status {
   public: virtual void cbiStatusFunction(ACStatus status, int value) = 0;
+};
+
+// Optional observer for raw frames, used for protocol analysis. It is handed every frame
+// that completed a transfer, valid or not, together with the matching ErrMsg so that a
+// rejected frame can be logged rather than silently dropped.
+class CallbackInterface_Frame {
+  public: virtual void cbiFrameFunction(const byte* mosi_frame, const byte* miso_frame, byte frame_size, int status) = 0;
 };
 
 class MHI_AC_Ctrl_Core {
@@ -144,6 +163,8 @@ class MHI_AC_Ctrl_Core {
     byte op_protection_no_old;
     byte op_ou_fanspeed_old;
     byte op_defrost_old;
+    byte op_silent_old;
+    bool op_silent_known;                 // false until a Silent Mode record has been seen
     uint16_t op_comp_old;
     byte op_td_old;
     uint16_t op_ou_eev1_old;
@@ -162,13 +183,40 @@ class MHI_AC_Ctrl_Core {
     byte new_VanesLR0 = 0;
     byte new_VanesLR1 = 0;
     byte new_3Dauto = 0;
+    byte new_Silent = 0;
+    byte silent_phase = silent_settled;
+
+    // Frame scheduling state. These are members rather than statics inside loop() so that
+    // init() can put the scheduler back to a known point.
+    bool doubleframe = false;
+    int frame = 1;
+    byte opdataNo = 0;
+    byte erropdataCnt = 0;            // number of expected error operating data records
+
+    // The service mailbox. Only the arbiter in loop() writes these.
+    byte mailbox_db6 = 0x80;
+    byte mailbox_db9 = 0xff;
+    byte mailbox_db10 = 0xff;
+    byte mailbox_owner = mailbox_idle;
+    byte mailbox_send = 0;            // frames the payload is still on the wire
+    byte mailbox_hold = 0;            // frames before another transaction may start
+
+    byte MOSI_frame[33] = {0};
+    //                     sb0   sb1   sb2   db0   db1   db2   db3   db4   db5   db6   db7   db8   db9  db10  db11  db12  db13  db14  chkH  chkL  db15  db16  db17  db18  db19  db20  db21  db22  db23  db24  db25  db26  chk2L
+    byte MISO_frame[33] = { 0xA9, 0x00, 0x07, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x22 };
     byte frameSize = 20;
 
     CallbackInterface_Status *m_cbiStatus;
+    CallbackInterface_Frame *m_cbiFrame = nullptr;
+    bool opdata_polling = true;
 
   public:
     void MHIAcCtrlStatus(CallbackInterface_Status *cb) {
       m_cbiStatus = cb;
+    };
+
+    void MHIAcCtrlFrame(CallbackInterface_Frame *cb) {
+      m_cbiFrame = cb;
     };
 
 
@@ -187,5 +235,7 @@ class MHI_AC_Ctrl_Core {
     void set_frame_size(byte framesize);  // set framesize to 20 or 33
     void set_3Dauto(AC3Dauto Dauto);      // set the requested 3D auto mode
     void set_vanesLR(uint vanesLR);       // set the vanes vertical position
+    void set_silent(boolean silent);      // switch the outdoor unit quiet function (Silent Mode) on/off
+    void set_opdata_polling(boolean on);  // stop requesting operating data, to keep the service mailbox quiet
 
 };

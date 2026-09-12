@@ -46,6 +46,11 @@ void MhiClimate::update_status(ACStatus status, int value) {
     
     ESP_LOGD(TAG, "received status=%i value=%i power=%i", status, value, this->power_);
 
+    // Silent Mode is not a climate concern. Without this, the power-off workaround below
+    // would emit a climate state update for every Silent Mode poll and every toggle.
+    if (status == opdata_silent)
+        return;
+
     if (this->power_ == power_off) {
         // Workaround for status after reboot
         this->mode = climate::CLIMATE_MODE_OFF;

@@ -160,3 +160,12 @@ switch:
   - platform: MhiAcCtrl
     vanes_3d_auto:
       name: "3D Auto"
+    # Outdoor unit quiet function, not the indoor fan's quiet speed
+    silent_mode:
+      name: "Silent mode"
+    # Diagnostics for protocol analysis, see "SPI frame logging" in the README.
+    # Logging always boots off; polling always boots on.
+    spi_logging:
+      name: "SPI logging"
+    operating_data_polling:
+      name: "Operating data polling"

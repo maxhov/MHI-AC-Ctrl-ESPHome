@@ -1,4 +1,7 @@
 #include "mhi_platform.h"
+#include "mhi_frame_filter.h"
+
+#include <string.h>
 
 int SCK_PIN = 14;
 int MOSI_PIN = 13;
@@ -22,6 +25,7 @@ void MhiPlatform::setup() {
     }
 
     this->mhi_ac_ctrl_core_.MHIAcCtrlStatus(this);
+    this->mhi_ac_ctrl_core_.MHIAcCtrlFrame(this);
     this->mhi_ac_ctrl_core_.init();
     this->mhi_ac_ctrl_core_.set_frame_size(this->frame_size_); // set framesize. Only 20 (legacy) or 33 (includes 3D auto and vertical vanes) possible
 
@@ -192,6 +196,78 @@ void MhiPlatform::set_3Dauto(bool value) {
     } else {
         ESP_LOGD("main", "Not setting 3d auto: %i because of frame_size", value);
     }
+}
+
+// Silent Mode rides on the service mailbox, which is part of the short frame, so unlike
+// 3D auto it does not depend on frame_size.
+void MhiPlatform::set_silent(bool value) {
+    this->mhi_ac_ctrl_core_.set_silent(value);
+    ESP_LOGD(TAG, "set silent mode: %i", value);
+}
+
+
+void MhiPlatform::set_spi_logging(bool value) {
+    this->spi_logging_ = value;
+    if (value)
+        this->have_previous_frame_ = false;  // start a capture with a baseline frame
+    ESP_LOGI(TAG, "SPI frame logging %s", value ? "enabled" : "disabled");
+}
+
+void MhiPlatform::set_opdata_polling(bool value) {
+    this->mhi_ac_ctrl_core_.set_opdata_polling(value);
+    ESP_LOGI(TAG, "operating data polling %s", value ? "enabled" : "disabled");
+}
+
+void MhiPlatform::cbiFrameFunction(const byte* mosi_frame, const byte* miso_frame, byte frame_size, int status) {
+    this->frame_sequence_++;
+    if (!this->spi_logging_)
+        return;
+
+    // Frames arrive about 20 times a second. Formatting and shipping every one of them costs
+    // more than the frame interval allows and disturbs the very SPI timing being investigated,
+    // so only frames that actually changed are logged. Switch the operating data polling off
+    // as well and a settled unit goes quiet, which is what makes a remote keypress obvious.
+    if (status != err_msg_valid_frame) {
+        // A bad bus rejects a frame every ~50 ms, and formatting each one from inside the
+        // frame loop steals the time the next frame needs — the failure feeds itself. Report
+        // the first, then at most one line per second with a count of what was skipped. A
+        // corrupt frame must also never become the baseline the change filter compares
+        // against, so this returns without touching it.
+        this->rejected_since_log_++;
+        bool first = (this->last_reject_log_frame_ == 0);
+        if (!first && this->frame_sequence_ - this->last_reject_log_frame_ < 20)
+            return;
+        this->last_reject_log_frame_ = this->frame_sequence_;
+        char rejected_hex[33 * 3];
+        format_hex(mosi_frame, frame_size, rejected_hex);
+        ESP_LOGI(TAG, "#%u rejected status=%i (%u since the last of these) MOSI %s",
+                 this->frame_sequence_, status, this->rejected_since_log_, rejected_hex);
+        this->rejected_since_log_ = 0;
+        return;
+    }
+
+    byte mosi_now[33];
+    byte miso_now[33];
+    normalise_frame(mosi_frame, mosi_now, frame_size, true);
+    normalise_frame(miso_frame, miso_now, frame_size, false);
+
+    bool changed = !this->have_previous_frame_
+        || memcmp(mosi_now, this->previous_mosi_, frame_size) != 0
+        || memcmp(miso_now, this->previous_miso_, frame_size) != 0;
+
+    if (!changed)
+        return;
+
+    memcpy(this->previous_mosi_, mosi_now, frame_size);
+    memcpy(this->previous_miso_, miso_now, frame_size);
+    this->have_previous_frame_ = true;
+
+    char mosi_hex[33 * 3];
+    char miso_hex[33 * 3];
+    format_hex(mosi_frame, frame_size, mosi_hex);
+    format_hex(miso_frame, frame_size, miso_hex);
+
+    ESP_LOGI(TAG, "#%u status=%i MOSI %s | MISO %s", this->frame_sequence_, status, mosi_hex, miso_hex);
 }
 
 void MhiPlatform::add_listener(MhiStatusListener* listener) {
