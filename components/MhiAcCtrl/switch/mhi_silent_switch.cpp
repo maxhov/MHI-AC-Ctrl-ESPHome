@@ -15,7 +15,7 @@ void MhiSilentSwitch::write_state(bool state) {
     // The AC only reports Silent Mode when polled, so show the request immediately rather
     // than leaving the switch on its old position for a poll cycle.
     this->publish_state(state);
-    ESP_LOGD(TAG, "silent mode state written %d", state);
+    ESP_LOGI(TAG, "silent mode state written %d", state);
 }
 
 void MhiSilentSwitch::dump_config(){
@@ -27,7 +27,7 @@ void MhiSilentSwitch::update_status(ACStatus status, int value) {
 
     if (status == opdata_silent) {
         this->publish_state(value != 0);
-        ESP_LOGD(TAG, "silent mode status updated: %s", value != 0 ? "enabled" : "disabled");
+        ESP_LOGI(TAG, "silent mode status updated: %s", value != 0 ? "enabled" : "disabled");
     }
 }
 

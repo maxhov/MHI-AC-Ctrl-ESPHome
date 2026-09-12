@@ -211,7 +211,7 @@ void MhiPlatform::set_3Dauto(bool value) {
 // 3D auto it does not depend on frame_size.
 void MhiPlatform::set_silent(bool value) {
     this->mhi_ac_ctrl_core_.set_silent(value);
-    ESP_LOGD(TAG, "set silent mode: %i", value);
+    ESP_LOGI(TAG, "set silent mode: %i", value);
 }
 
 

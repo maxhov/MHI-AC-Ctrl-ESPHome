@@ -78,6 +78,11 @@ switch:
       name: "Operating data polling"
 ```
 
+Silent Mode logs what it does at `INFO`, so the evidence survives the `level: INFO` that the
+shipped examples set: the command being written, and the state the AC reports back. The
+per-frame chatter stays at `DEBUG`, because logging every frame is what disturbs the timing
+in the first place.
+
 `spi_logging` dumps frames to the ESPHome log as hex, MOSI alongside MISO. `operating_data_polling`
 turns the operating data requests off, which stops the service mailbox bytes churning.
 
