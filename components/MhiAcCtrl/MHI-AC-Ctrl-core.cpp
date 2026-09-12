@@ -26,6 +26,8 @@ void MHI_AC_Ctrl_Core::reset_old_values() {  // used e.g. when MQTT connection t
   status_troom_old = 0xfe;
   status_tsetpoint_old = 0x00;
   status_errorcode_old = 0xff;
+  status_compressor_old = 0xff;
+  status_heating_old = 0xff;
   status_vanesLR_old = 0xff;
   status_3Dauto_old = 0xff;
 
@@ -419,6 +421,16 @@ int MHI_AC_Ctrl_Core::loop(uint max_time_ms) {
     if (MOSI_frame[DB2] != status_tsetpoint_old) { // Temperature setpoint
       status_tsetpoint_old = MOSI_frame[DB2];
       m_cbiStatus->cbiStatusFunction(status_tsetpoint, status_tsetpoint_old);
+    }
+
+    if ((MOSI_frame[DB13] & 0x02) != status_heating_old) { // heating, as opposed to the requested mode
+      status_heating_old = MOSI_frame[DB13] & 0x02;
+      m_cbiStatus->cbiStatusFunction(status_heating, status_heating_old != 0);
+    }
+
+    if ((MOSI_frame[DB13] & 0x04) != status_compressor_old) { // compressor actually running
+      status_compressor_old = MOSI_frame[DB13] & 0x04;
+      m_cbiStatus->cbiStatusFunction(status_compressor, status_compressor_old != 0);
     }
 
     if (MOSI_frame[DB4] != status_errorcode_old) { // error code

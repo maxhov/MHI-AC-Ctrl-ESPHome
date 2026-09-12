@@ -52,6 +52,7 @@ extern int MISO_PIN;
 #define DB10 SB2 + 11
 #define DB11 SB2 + 12
 #define DB12 SB2 + 13
+#define DB13 SB2 + 14
 #define DB14 SB2 + 15
 #define CBH DB14 + 1
 #define CBL DB14 + 2
@@ -79,6 +80,7 @@ enum ACType {   // Type enum
 
 enum ACStatus { // Status enum
   status_power = type_status, status_mode, status_fan, status_vanes, status_vanesLR, status_3Dauto, status_troom, status_tsetpoint, status_errorcode,
+  status_compressor, status_heating, status_frame_errors,
   opdata_mode = type_opdata, opdata_kwh, opdata_tsetpoint, opdata_return_air, opdata_outdoor, opdata_tho_r1, opdata_iu_fanspeed, opdata_thi_r1, opdata_thi_r2, opdata_thi_r3,
   opdata_ou_fanspeed, opdata_total_iu_run, opdata_total_comp_run, opdata_comp, opdata_ct, opdata_td,
   opdata_tdsh, opdata_protection_no, opdata_defrost, opdata_ou_eev1, opdata_silent, opdata_unknown,
@@ -141,6 +143,8 @@ class MHI_AC_Ctrl_Core {
     byte status_troom_old;
     byte status_tsetpoint_old;
     byte status_errorcode_old;
+    byte status_compressor_old;
+    byte status_heating_old;
 
     byte status_vanesLR_old;
     byte status_3Dauto_old;

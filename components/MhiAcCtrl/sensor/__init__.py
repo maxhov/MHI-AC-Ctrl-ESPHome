@@ -15,6 +15,7 @@ from esphome.const import (
     UNIT_KILOWATT_HOURS,
     ICON_THERMOMETER,
     ICON_FAN,
+    ENTITY_CATEGORY_DIAGNOSTIC,
 )
 from .. import MhiAcCtrl, CONF_MHI_AC_CTRL_ID
 
@@ -22,6 +23,7 @@ mhi_ns = cg.esphome_ns.namespace('mhi')
 MhiSensors = mhi_ns.class_('MhiSensors', cg.Component)
 
 CONF_ERROR_CODE = "error_code"
+CONF_FRAME_ERRORS = "frame_errors"
 CONF_OUTDOOR_TEMPERATURE = "outdoor_temperature"
 CONF_RETURN_AIR_TEMPERATURE = "return_air_temperature"
 CONF_OUTDOOR_UNIT_FAN_SPEED = "outdoor_unit_fan_speed"
@@ -58,6 +60,12 @@ UNIT_PULSE = "pulse"
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(MhiSensors),
     cv.GenerateID(CONF_MHI_AC_CTRL_ID): cv.use_id(MhiAcCtrl),
+    cv.Optional(CONF_FRAME_ERRORS): sensor.sensor_schema(
+        accuracy_decimals=0,
+        state_class=STATE_CLASS_TOTAL_INCREASING,
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        icon="mdi:alert-circle-outline",
+    ),
     cv.Optional(CONF_ERROR_CODE): sensor.sensor_schema(
     ),
     cv.Optional(CONF_OUTDOOR_TEMPERATURE): sensor.sensor_schema(
@@ -178,6 +186,10 @@ async def to_code(config):
     await cg.register_component(var, config)
     await cg.register_parented(var, mhi)
 
+    if CONF_FRAME_ERRORS in config:
+        conf = config[CONF_FRAME_ERRORS]
+        sens = await sensor.new_sensor(conf)
+        cg.add(var.set_frame_errors(sens))
     if CONF_ERROR_CODE in config:
         conf = config[CONF_ERROR_CODE]
         sens = await sensor.new_sensor(conf)

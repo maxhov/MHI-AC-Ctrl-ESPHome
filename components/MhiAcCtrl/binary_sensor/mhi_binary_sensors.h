@@ -16,6 +16,8 @@ class MhiBinarySensors :
 public:
     void set_defrost(BinarySensor* sensor);    
     void set_vanes_3d_auto_enabled(BinarySensor* sensor);
+    void set_compressor(BinarySensor* sensor);
+    void set_heating(BinarySensor* sensor);
 
 protected:
     void setup() override;
@@ -24,6 +26,8 @@ protected:
 private:
     BinarySensor* defrost_;    
     BinarySensor* vanes_3d_auto_enabled_;
+    BinarySensor* compressor_{nullptr};
+    BinarySensor* heating_{nullptr};
 };
 
 }

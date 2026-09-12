@@ -513,6 +513,53 @@ static void test_frame_filter() {
   check(std::string(text) == "A9 00 0F", "hex formatting");
 }
 
+static void test_db13_reports_what_the_unit_is_doing() {
+  printf("DB13 reports compressor and heating independently of each other\n");
+  core.reset_old_values();
+
+  struct { uint8_t db13; int heating; int compressor; const char *what; } cases[] = {
+    {0x00, 0, 0, "idle, not heating"},
+    {0x04, 0, 1, "compressor starts"},
+    {0x06, 1, 1, "heating starts while it runs"},
+    {0x02, 1, 0, "compressor stops, still heating"},
+    {0x00, 0, 0, "heating stops too"},
+  };
+
+  uint8_t nonce = 0x70;
+  int prev_heating = -1, prev_compressor = -1;   // -1: nothing reported yet
+  for (auto &c : cases) {
+    capture.clear();
+    MosiFrame f;
+    f.bytes[DB13] = c.db13;
+    f.bytes[DB14] = nonce++;
+    run_frame(f);
+
+    // Each bit is reported when it moves and stays quiet when it does not, independently of
+    // the other one.
+    if (c.heating != prev_heating)
+      check(capture.has(status_heating, c.heating), std::string("heating reported: ") + c.what);
+    else
+      check_eq(capture.count(status_heating), 0, std::string("heating stayed quiet: ") + c.what);
+
+    if (c.compressor != prev_compressor)
+      check(capture.has(status_compressor, c.compressor), std::string("compressor reported: ") + c.what);
+    else
+      check_eq(capture.count(status_compressor), 0, std::string("compressor stayed quiet: ") + c.what);
+
+    prev_heating = c.heating;
+    prev_compressor = c.compressor;
+  }
+
+  // The other bits of DB13 are documented as unknown and must not disturb either reading.
+  capture.clear();
+  MosiFrame noise;
+  noise.bytes[DB13] = 0xf9;          // every bit except the two known ones
+  noise.bytes[DB14] = nonce++;
+  run_frame(noise);
+  check_eq(capture.count(status_heating), 0, "unknown DB13 bits are not treated as heating");
+  check_eq(capture.count(status_compressor), 0, "unknown DB13 bits are not treated as the compressor");
+}
+
 static void test_silent_status_is_polled() {
   printf("Silent Mode state is polled in the operating data cycle\n");
   bool requested = false;
@@ -586,6 +633,7 @@ int main() {
   test_unrelated_flags_do_not_re_announce_silent_mode();
   test_repeated_toggles_do_not_starve_the_poller();
   test_frame_filter();
+  test_db13_reports_what_the_unit_is_doing();
   test_silent_status_is_polled();
   test_silent_write_still_works_with_polling_off();
   test_frame_observer();

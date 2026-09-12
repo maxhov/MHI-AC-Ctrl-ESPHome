@@ -15,6 +15,7 @@ class MhiSensors :
 
 public:
     void set_error_code(Sensor* sensor);
+    void set_frame_errors(Sensor* sensor);
     void set_outdoor_temperature(Sensor* sensor);
     void set_return_air_temperature(Sensor* sensor);
     void set_outdoor_unit_fan_speed(Sensor* sensor);
@@ -42,6 +43,7 @@ protected:
 private:
 
     Sensor* error_code_;
+    Sensor* frame_errors_{nullptr};
     Sensor* outdoor_temperature_;
     Sensor* return_air_temperature_;
     Sensor* outdoor_unit_fan_speed_;

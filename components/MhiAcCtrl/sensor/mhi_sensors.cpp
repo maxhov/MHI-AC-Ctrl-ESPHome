@@ -6,6 +6,7 @@ namespace mhi {
 static const char* TAG = "mhi.sensor";
 
 void MhiSensors::set_error_code (Sensor* sensor) { error_code_ = sensor; }
+void MhiSensors::set_frame_errors (Sensor* sensor) { frame_errors_ = sensor; }
 void MhiSensors::set_outdoor_temperature (Sensor* sensor) { outdoor_temperature_ = sensor; }
 void MhiSensors::set_return_air_temperature (Sensor* sensor) { return_air_temperature_ = sensor; }
 void MhiSensors::set_outdoor_unit_fan_speed (Sensor* sensor) { outdoor_unit_fan_speed_ = sensor; }
@@ -37,6 +38,9 @@ void MhiSensors::dump_config() {
     ESP_LOGCONFIG(TAG, "MHI Sensors");
     if (error_code_ != NULL) {
         ESP_LOGCONFIG(TAG, "  error_code: %f", this->error_code_->state);
+    }
+    if (frame_errors_ != NULL) {
+        ESP_LOGCONFIG(TAG, "  frame_errors: %f", this->frame_errors_->state);
     }
     if (outdoor_temperature_ != NULL) {
         ESP_LOGCONFIG(TAG, "  outdoor_temperature: %f", this->outdoor_temperature_->state);
@@ -110,6 +114,14 @@ void MhiSensors::update_status(ACStatus status, int value) {
     case status_vanesLR:
         if (this->vanesLR_pos_ != NULL) { 
             this->vanesLR_pos_ -> publish_state(value); 
+        }
+        break;
+    case status_frame_errors:
+        // Running total of frames the controller could not read. Flat is healthy; a rising
+        // rate means the SPI timing is marginal, which is the failure this hardware is
+        // prone to and which a log you have to watch will not tell you.
+        if (this->frame_errors_ != NULL) {
+            this->frame_errors_ -> publish_state(value);
         }
         break;
     case status_errorcode:
