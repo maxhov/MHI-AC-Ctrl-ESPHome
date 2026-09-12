@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -264,28 +265,71 @@ static void test_unsolicited_status_record_is_decoded() {
   }
 }
 
-static void test_state_is_resynced_after_a_command() {
-  printf("the state is reported again after a command, even when unchanged\n");
+static void test_confirmation_waits_for_a_fresh_read() {
+  printf("a Silent write is confirmed by a fresh read, not by a reply already in flight\n");
+
+  MosiFrame on;
+  on.bytes[DB9] = 0xdd;
+  on.bytes[DB10] = 0x80;
+  on.bytes[DB11] = 0x20;
+  on.bytes[DB12] = 0x00;
+
+  capture.clear();
+  run_frame(on);
+  check(capture.has(opdata_silent, 1), "baseline: Silent Mode reads as on");
+
+  core.set_silent(false);
+
+  // A reply that crossed with the command still describes the old state. Reporting it would
+  // flip the switch back under the user a moment after they moved it.
+  capture.clear();
+  MosiFrame stale = on;
+  stale.bytes[DB14] = 0x11;
+  run_frame(stale);
+  check_eq(capture.count(opdata_silent), 0, "a reply already in flight does not bounce the switch");
+
+  // Once the poller asks again the answer is authoritative, and is reported even when it is
+  // unchanged, which is what surfaces a command the AC ignored.
+  bool asked = false;
+  for (int i = 0; i < 900 && !asked; i++) {
+    MisoFrame miso = run_frame(idle_frame((uint8_t)(0x30 + (uint8_t)i)));
+    if (miso.bytes[DB6] == 0xc0 && miso.bytes[DB9] == 0xdd)
+      asked = true;
+  }
+  check(asked, "the poller re-reads Silent Mode after a write");
+
+  capture.clear();
+  MosiFrame again = on;
+  again.bytes[DB14] = 0x22;
+  run_frame(again);
+  check(capture.has(opdata_silent, 1), "the fresh reading is reported even though unchanged");
+}
+
+static void test_all_flags_set_is_a_value_not_a_sentinel() {
+  printf("a DB11 of 0xff is reported rather than mistaken for 'nothing seen yet'\n");
+  core.reset_old_values();
+  capture.clear();
+
   MosiFrame rec;
   rec.bytes[DB9] = 0xdd;
   rec.bytes[DB10] = 0x80;
-  rec.bytes[DB11] = 0x20;
+  rec.bytes[DB11] = 0xff;   // every flag set, which used to collide with the sentinel
   rec.bytes[DB12] = 0x00;
-
-  capture.clear();
   run_frame(rec);
-  check(capture.has(opdata_silent, 1), "baseline state is reported");
+  check(capture.has(opdata_silent, 1), "0xff is reported as a real reading");
+}
 
-  // The AC ignores the command and keeps reporting the same state.
-  core.set_silent(false);
-  for (int i = 0; i < 4; i++)
-    run_frame(idle_frame((uint8_t)(0xc0 + i)));
-
-  capture.clear();
-  MosiFrame same = rec;
-  same.bytes[DB14] = 0x01;  // a different frame, same Silent Mode state
-  run_frame(same);
-  check(capture.has(opdata_silent, 1), "state is re-reported so the switch can correct itself");
+static void test_repeated_toggles_do_not_starve_the_poller() {
+  printf("repeated Silent toggles do not starve the operating data poller\n");
+  std::set<int> selectors;
+  for (int i = 0; i < 1200; i++) {
+    if (i % 40 == 0)
+      core.set_silent((i % 80) == 0);
+    MisoFrame miso = run_frame(idle_frame((uint8_t) i));
+    if (miso.bytes[DB9] != 0xff && miso.bytes[DB9] != 0x21)
+      selectors.insert((miso.bytes[DB6] << 8) | miso.bytes[DB9]);
+  }
+  check((int) selectors.size() >= 21, "every operating data selector is still requested");
 }
 
 static void test_silent_status_is_polled() {
@@ -373,7 +417,9 @@ int main() {
   test_status_record_is_decoded();
   test_status_record_is_not_confused_with_other_records();
   test_unsolicited_status_record_is_decoded();
-  test_state_is_resynced_after_a_command();
+  test_confirmation_waits_for_a_fresh_read();
+  test_all_flags_set_is_a_value_not_a_sentinel();
+  test_repeated_toggles_do_not_starve_the_poller();
   test_silent_status_is_polled();
   test_poller_can_be_collapsed();
   test_silent_write_still_works_with_polling_off();

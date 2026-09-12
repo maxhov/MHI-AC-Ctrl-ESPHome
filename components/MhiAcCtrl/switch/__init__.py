@@ -31,12 +31,12 @@ CONFIG_SCHEMA = cv.Schema({
         device_class=DEVICE_CLASS_SWITCH,
         icon=ICON_3D,
     ),
-    # The AC reports its own Silent Mode state, so don't write a restored state on boot.
+    # No restore mode is set: no switch here calls restore_state_(), so none of them write
+    # a remembered state on boot. The AC reports its own Silent Mode state instead.
     cv.Optional(CONF_SILENT_MODE): switch.switch_schema(
         MhiSilentSwitch,
         device_class=DEVICE_CLASS_SWITCH,
         icon=ICON_SILENT,
-        default_restore_mode="DISABLED",
     ),
     # Both diagnostics force their safe state in setup(), so the restore mode is irrelevant:
     # logging always boots off, polling always boots on.

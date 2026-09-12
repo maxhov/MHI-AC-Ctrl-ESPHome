@@ -153,6 +153,7 @@ class MHI_AC_Ctrl_Core {
     byte op_ou_fanspeed_old;
     byte op_defrost_old;
     byte op_silent_old;
+    bool op_silent_known;                 // false until a Silent Mode record has been seen
     uint16_t op_comp_old;
     byte op_td_old;
     uint16_t op_ou_eev1_old;
@@ -172,6 +173,7 @@ class MHI_AC_Ctrl_Core {
     byte new_VanesLR1 = 0;
     byte new_3Dauto = 0;
     byte new_Silent = 0;
+    bool silent_confirm_pending = false;  // a Silent write is waiting on a fresh reading
     byte frameSize = 20;
 
     CallbackInterface_Status *m_cbiStatus;

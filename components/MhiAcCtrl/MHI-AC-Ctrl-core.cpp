@@ -47,7 +47,7 @@ void MHI_AC_Ctrl_Core::reset_old_values() {  // used e.g. when MQTT connection t
   op_protection_no_old = 0xff;
   op_ou_fanspeed_old = 0xff;
   op_defrost_old = 0x00;
-  op_silent_old = 0xff;
+  op_silent_known = false;
   op_comp_old = 0xffff;
   op_td_old  = 0x00;
   op_ou_eev1_old = 0xffff;
@@ -93,8 +93,10 @@ void MHI_AC_Ctrl_Core::set_vanes(uint vanes) {
 
 void MHI_AC_Ctrl_Core::set_silent(boolean silent) {
   new_Silent = 0b10 | silent;
-  op_silent_old = 0xff;   // report the next status record even if it is unchanged, so a
-                          // command the AC ignored does not leave the switch out of sync
+  // Only a reading requested after the write can confirm it. Forgetting the cached state
+  // here instead would also accept a reply that was already in flight, which still carries
+  // the old state and would bounce the switch back; see the opdata request in loop().
+  silent_confirm_pending = true;
 }
 
 void MHI_AC_Ctrl_Core::set_opdata_polling(boolean on) {
@@ -193,6 +195,13 @@ static byte MOSI_frame[33];
       if (erropdataCnt == 0 && silentFramesLeft == 0) {
         MISO_frame[DB6] = pgm_read_word(opdata + opdataNo);
         MISO_frame[DB9] = pgm_read_word(opdata + opdataNo) >> 8;
+        // Forget the cached Silent Mode state when re-reading it after a write, so that the
+        // reply is reported even when unchanged. That is what reveals a command the AC
+        // ignored, and only the reply to this request can settle it.
+        if (silent_confirm_pending && MISO_frame[DB6] == 0xc0 && MISO_frame[DB9] == 0xdd) {
+          op_silent_known = false;
+          silent_confirm_pending = false;
+        }
         opdataNo = (opdataNo + 1) % opdataCnt;
       }
 
@@ -233,6 +242,8 @@ static byte MOSI_frame[33];
     new_Vanes0 = 0;
     new_Vanes1 = 0;
 
+    // request_ErrOpData() has no caller anywhere in the component, so this branch never
+    // runs today. The guard is here so it stays correct if it is ever wired up.
     if (request_erropData && silentFramesLeft == 0) {
       MISO_frame[DB6] = 0x80;
       MISO_frame[DB9] = 0x45;
@@ -637,8 +648,9 @@ static byte MOSI_frame[33];
         // The AC also sends this record unsolicited after Silent Mode is changed with the
         // remote, and then DB6 does not carry the request group, so it is not checked here.
         if ((MOSI_frame[DB10] == 0x80) && (MOSI_frame[DB12] == 0x00)) {
-          if (MOSI_frame[DB11] != op_silent_old) {
+          if (!op_silent_known || MOSI_frame[DB11] != op_silent_old) {
             op_silent_old = MOSI_frame[DB11];
+            op_silent_known = true;
             m_cbiStatus->cbiStatusFunction(opdata_silent, (op_silent_old & 0x20) != 0);
           }
         }
