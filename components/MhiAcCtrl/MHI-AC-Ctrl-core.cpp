@@ -179,7 +179,7 @@ static byte MOSI_frame[33];
   }
   
   // Requesting all different opdata's is an opdata cycle. A cycle will take 20s.
-  // With the current 20 different opdata's, every opdata request will take 1sec (interval).
+  // With the current 21 different opdata's, every opdata request will take about 1sec (interval).
   // If there are only 5 different opdata's defined, these 5 will be spread about the 20s cycle. The interval will increase.
   // requesting a new opdata will always start at a doubleframe start
   if ((frame > (NoFramesPerOpDataCycle / opdataCnt)) && doubleframe ) {    // interval for requesting new opdata depending on de number of opdata requests
@@ -648,10 +648,13 @@ static byte MOSI_frame[33];
         // The AC also sends this record unsolicited after Silent Mode is changed with the
         // remote, and then DB6 does not carry the request group, so it is not checked here.
         if ((MOSI_frame[DB10] == 0x80) && (MOSI_frame[DB12] == 0x00)) {
-          if (!op_silent_known || MOSI_frame[DB11] != op_silent_old) {
-            op_silent_old = MOSI_frame[DB11];
+          // Only bit 5 is reported, so only bit 5 is remembered. Caching the whole byte
+          // re-announced the same Silent Mode state whenever an unrelated flag moved.
+          byte silent_flag = MOSI_frame[DB11] & 0x20;
+          if (!op_silent_known || silent_flag != op_silent_old) {
+            op_silent_old = silent_flag;
             op_silent_known = true;
-            m_cbiStatus->cbiStatusFunction(opdata_silent, (op_silent_old & 0x20) != 0);
+            m_cbiStatus->cbiStatusFunction(opdata_silent, silent_flag != 0);
           }
         }
         break;

@@ -319,6 +319,35 @@ static void test_all_flags_set_is_a_value_not_a_sentinel() {
   check(capture.has(opdata_silent, 1), "0xff is reported as a real reading");
 }
 
+static void test_unrelated_flags_do_not_re_announce_silent_mode() {
+  printf("an unrelated DB11 flag does not re-announce the same Silent Mode state\n");
+  core.reset_old_values();
+
+  MosiFrame rec;
+  rec.bytes[DB9] = 0xdd;
+  rec.bytes[DB10] = 0x80;
+  rec.bytes[DB11] = 0x20;
+  rec.bytes[DB12] = 0x00;
+
+  capture.clear();
+  run_frame(rec);
+  check(capture.has(opdata_silent, 1), "the first reading is reported");
+
+  // Same Silent Mode bit, some other flag in the byte moved.
+  capture.clear();
+  MosiFrame other = rec;
+  other.bytes[DB11] = 0x21;
+  run_frame(other);
+  check_eq(capture.count(opdata_silent), 0, "an unrelated flag is not a Silent Mode change");
+
+  // The bit itself moving is still reported.
+  capture.clear();
+  MosiFrame off = rec;
+  off.bytes[DB11] = 0x01;
+  run_frame(off);
+  check(capture.has(opdata_silent, 0), "the Silent Mode bit clearing is still reported");
+}
+
 static void test_repeated_toggles_do_not_starve_the_poller() {
   printf("repeated Silent toggles do not starve the operating data poller\n");
   std::set<int> selectors;
@@ -419,6 +448,7 @@ int main() {
   test_unsolicited_status_record_is_decoded();
   test_confirmation_waits_for_a_fresh_read();
   test_all_flags_set_is_a_value_not_a_sentinel();
+  test_unrelated_flags_do_not_re_announce_silent_mode();
   test_repeated_toggles_do_not_starve_the_poller();
   test_silent_status_is_polled();
   test_poller_can_be_collapsed();
