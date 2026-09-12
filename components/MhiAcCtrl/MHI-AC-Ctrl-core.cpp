@@ -47,6 +47,7 @@ void MHI_AC_Ctrl_Core::reset_old_values() {  // used e.g. when MQTT connection t
   op_protection_no_old = 0xff;
   op_ou_fanspeed_old = 0xff;
   op_defrost_old = 0x00;
+  op_silent_old = 0xff;
   op_comp_old = 0xffff;
   op_td_old  = 0x00;
   op_ou_eev1_old = 0xffff;
@@ -90,6 +91,12 @@ void MHI_AC_Ctrl_Core::set_vanes(uint vanes) {
   }
 }
 
+void MHI_AC_Ctrl_Core::set_silent(boolean silent) {
+  new_Silent = 0b10 | silent;
+  op_silent_old = 0xff;   // report the next status record even if it is unchanged, so a
+                          // command the AC ignored does not leave the switch out of sync
+}
+
 void MHI_AC_Ctrl_Core::set_vanesLR(uint vanesLR) {
   if (vanesLR == vanesLR_swing) {
     new_VanesLR0 = 0b00001011; // enable swing
@@ -131,6 +138,8 @@ int MHI_AC_Ctrl_Core::loop(uint max_time_ms) {
   static byte erropdataCnt = 0;           // number of expected error operating data
   static bool doubleframe = false;
   static int frame = 1;
+  static byte silentFramesLeft = 0;       // frames left to transmit a pending Silent Mode command
+  static byte silentValue = 0;
 static byte MOSI_frame[33];
   //                            sb0   sb1   sb2   db0   db1   db2   db3   db4   db5   db6   db7   db8   db9  db10  db11  db12  db13  db14  chkH  chkL  db15  db16  db17  db18  db19  db20  db21  db22  db23  db24  db25  db26  chk2L
   static byte MISO_frame[] = { 0xA9, 0x00, 0x07, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x22 };
@@ -153,6 +162,15 @@ static byte MOSI_frame[33];
 
   doubleframe = !doubleframe;             // toggle every frame
   MISO_frame[DB14] = doubleframe << 2;    // MISO_frame[DB14] bit2 toggles with every frame
+
+  // Silent Mode is not one of the fixed setting bits, it is a service write command that
+  // occupies DB6/DB9/DB10 for a whole frame pair. Start it on a doubleframe, and hold it
+  // back while error operating data is being collected so the two never overlap.
+  if (doubleframe && silentFramesLeft == 0 && erropdataCnt == 0 && new_Silent != 0) {
+    silentValue = new_Silent & 0x01;
+    silentFramesLeft = 2;
+    new_Silent = 0;
+  }
   
   // Requesting all different opdata's is an opdata cycle. A cycle will take 20s.
   // With the current 20 different opdata's, every opdata request will take 1sec (interval).
@@ -164,7 +182,7 @@ static byte MOSI_frame[33];
 
   if (frame++ <= 2) {                       // use opdata request only for 2 subsequent frames
     if (doubleframe) {                      // start when MISO_frame[DB14] bit2 is set
-      if (erropdataCnt == 0) {
+      if (erropdataCnt == 0 && silentFramesLeft == 0) {
         MISO_frame[DB6] = pgm_read_word(opdata + opdataNo);
         MISO_frame[DB9] = pgm_read_word(opdata + opdataNo) >> 8;
         opdataNo = (opdataNo + 1) % opdataCnt;
@@ -207,11 +225,23 @@ static byte MOSI_frame[33];
     new_Vanes0 = 0;
     new_Vanes1 = 0;
 
-    if (request_erropData) {
+    if (request_erropData && silentFramesLeft == 0) {
       MISO_frame[DB6] = 0x80;
       MISO_frame[DB9] = 0x45;
       request_erropData = false;
     }
+  }
+
+  // Applied after the other MISO writers so the command survives the frame it was
+  // scheduled for; DB10 goes back to idle once it has been sent.
+  if (silentFramesLeft > 0) {
+    MISO_frame[DB6] = 0x80;
+    MISO_frame[DB9] = 0x21;
+    MISO_frame[DB10] = silentValue;
+    silentFramesLeft--;
+  }
+  else {
+    MISO_frame[DB10] = 0xff;              // read requests expect an idle DB10
   }
 
   MISO_frame[DB3] = new_Troom;  // from MQTT or DS18x20
@@ -589,6 +619,16 @@ static byte MOSI_frame[33];
           }
           else
             m_cbiStatus->cbiStatusFunction(erropdata_ou_eev1, MOSI_frame[DB12] << 8 | MOSI_frame[DB11]);
+        }
+        break;
+      case 0xdd:                              // Silent Mode (outdoor unit quiet function)
+        // The AC also sends this record unsolicited after Silent Mode is changed with the
+        // remote, and then DB6 does not carry the request group, so it is not checked here.
+        if ((MOSI_frame[DB10] == 0x80) && (MOSI_frame[DB12] == 0x00)) {
+          if (MOSI_frame[DB11] != op_silent_old) {
+            op_silent_old = MOSI_frame[DB11];
+            m_cbiStatus->cbiStatusFunction(opdata_silent, (op_silent_old & 0x20) != 0);
+          }
         }
         break;
       case 0x45: // last error number or count of following error operating data

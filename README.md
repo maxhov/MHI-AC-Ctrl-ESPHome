@@ -31,6 +31,39 @@ CLIMATE_FAN_DIFFUSE in fan speed and status sections and reshuffle the numbers a
 
 Has now 5 different fan modes but I'm not sure if the auto mode works proper, keep testing.
 
+# Silent Mode
+
+Silent Mode is the **outdoor** unit's quiet function (the `Silent` button on the remote): it
+caps the compressor and outdoor fan speed, which roughly halves power draw at the cost of
+slower heating and cooling. It is a different thing from the indoor fan's quiet speed
+described above, which is a climate fan mode.
+
+Enable the switch to get it:
+
+```yaml
+switch:
+  - platform: MhiAcCtrl
+    silent_mode:
+      name: "Silent mode"
+```
+
+The state is read back from the AC, so switching Silent Mode with the remote is reflected in
+Home Assistant too. It works on both frame sizes, because the command travels in the service
+mailbox that the short frame already carries.
+
+Protocol details, reverse engineered by [@mreijnde](https://github.com/mreijnde) in
+[issue #166](https://github.com/ginkage/MHI-AC-Ctrl-ESPHome/issues/166):
+
+| Direction | DB6 | DB9 | DB10 | DB11 | DB12 | Meaning |
+| --- | --- | --- | --- | --- | --- | --- |
+| controller &rarr; AC | `80` | `21` | `01` | `ff` | `ff` | Silent ON |
+| controller &rarr; AC | `80` | `21` | `00` | `ff` | `ff` | Silent OFF |
+| controller &rarr; AC | `c0` | `dd` | `ff` | `ff` | `ff` | read the state |
+| AC &rarr; controller | | `dd` | `80` | flags | `00` | state, silent when `DB11 & 0x20` |
+
+> Confirmed on an SCM60ZS-W. Silent Mode is not documented by MHI, so if your unit does not
+> respond to the switch, please report the model in the issue above.
+
 # Low temperature heating and cooling
 
 To allow for lower temperature heating or cooling, set the visual_min_temperature in the climate section of the yaml like so:
@@ -52,6 +85,9 @@ This will allow for lower temperature heating or cooling.
 
 # Changelog:
 
+**Unreleased**
+ - Silent Mode switch: read and control the outdoor unit quiet function https://github.com/ginkage/MHI-AC-Ctrl-ESPHome/issues/166
+ - Host-side tests for the SPI framing in `test/`
 
 **v4.2** (2025-07)
  - Allow configuration of pins through yaml

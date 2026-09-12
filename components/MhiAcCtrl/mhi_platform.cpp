@@ -194,6 +194,13 @@ void MhiPlatform::set_3Dauto(bool value) {
     }
 }
 
+// Silent Mode rides on the service mailbox, which is part of the short frame, so unlike
+// 3D auto it does not depend on frame_size.
+void MhiPlatform::set_silent(bool value) {
+    this->mhi_ac_ctrl_core_.set_silent(value);
+    ESP_LOGD(TAG, "set silent mode: %i", value);
+}
+
 void MhiPlatform::add_listener(MhiStatusListener* listener) {
     this->listeners_.push_back(listener);
 }

@@ -37,6 +37,7 @@ public:
     void set_vanes(int value);
     void set_vanesLR(int value);
     void set_3Dauto(bool value);
+    void set_silent(bool value);
     void set_external_room_temperature_sensor(sensor::Sensor* sensor);
     void set_sck_pin(int pin) { this->sck_pin_ = pin; };
     void set_mosi_pin(int pin) { this->mosi_pin_ = pin; };
